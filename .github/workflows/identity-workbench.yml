@@ -3,57 +3,28 @@ name: Identity profile workbench
 on:
   push:
     branches: [work/identity-profile-validation-20260906]
-    paths:
-      - '.github/workflows/identity-workbench.yml'
-      - 'reviewed-volume-serial.patch.xz.b64'
+    paths: ['.github/workflows/identity-workbench.yml']
 
 permissions:
   contents: read
 
-concurrency:
-  group: identity-volume-workbench
-  cancel-in-progress: false
-
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      commit: ${{ steps.publish.outputs.commit }}
     steps:
       - uses: actions/checkout@v7
-      - name: Apply the reviewed patch to the isolated contribution branch
-        shell: bash
-        env:
-          BASE: 487d56309fafe90e2771d4c9004333fe01b77094
-          BRANCH: fix/volume-serial-cache-20260906
+        with:
+          ref: 47811e71d00367326bef81b5281ab036a4a479b5
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the published diff and package review evidence
+        shell: python
         run: |
-          set -euo pipefail
-          python - <<'PYTHON'
-          import base64, lzma, os
-          from pathlib import Path
-          encoded = Path('reviewed-volume-serial.patch.xz.b64').read_text().strip()
-          if len(encoded) > 65536:
-              raise SystemExit('Patch transport exceeds the limit')
-          decoder = lzma.LZMADecompressor(memlimit=128 * 1024 * 1024)
-          patch = decoder.decompress(base64.b64decode(encoded, validate=True), max_length=1024 * 1024)
-          if not decoder.eof or decoder.unused_data:
-              raise SystemExit('Incomplete or trailing patch data')
-          Path(os.environ['RUNNER_TEMP'], 'volume.patch').write_bytes(patch)
-          PYTHON
-          echo "16cee48980af83151c6a1632b2178f373c5fe6dea706ff0486bfdc6aa36b087e  $RUNNER_TEMP/volume.patch" | sha256sum --check
-          actual=$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)
-          test "$actual" = "$BASE"
-          git fetch --no-tags origin "$BASE"
-          git switch -c "$BRANCH" FETCH_HEAD
-          git apply --check "$RUNNER_TEMP/volume.patch"
-          git apply "$RUNNER_TEMP/volume.patch"
-          git add -N Sandboxie/core/dll/tests
-          git diff --check
-          python - <<'PY'
+          import hashlib
+          import json
           import subprocess
+          from pathlib import Path
           expected = {
               'CHANGELOG.md',
               'Sandboxie/core/dll/kernel.c',
@@ -63,37 +34,37 @@ jobs:
               'Sandboxie/core/dll/tests/generate_identity_fixture.py',
               'Sandboxie/core/dll/tests/kernel_identity_test.c',
           }
-          actual = set(subprocess.check_output(['git', 'diff', '--name-only']).decode().splitlines())
-          if actual != expected:
-              raise SystemExit('Unexpected contribution paths: ' + repr(actual ^ expected))
-          PY
-      - name: Build and run the synthetic fixtures
+          parent = subprocess.check_output(['git', 'rev-parse', 'HEAD^']).decode().strip()
+          if parent != '487d56309fafe90e2771d4c9004333fe01b77094':
+              raise SystemExit('Unexpected contribution parent')
+          paths = subprocess.check_output(['git', 'diff', '--name-only', 'HEAD^', 'HEAD']).decode().splitlines()
+          if set(paths) != expected:
+              raise SystemExit('Unexpected contribution paths')
+          subprocess.run(['git', 'diff', '--check', 'HEAD^', 'HEAD'], check=True)
+          patch = subprocess.check_output(['git', 'diff', '--full-index', 'HEAD^', 'HEAD'])
+          Path('reviewed-volume-serial.patch').write_bytes(patch)
+          manifest = {
+              'commit': '47811e71d00367326bef81b5281ab036a4a479b5',
+              'parent': parent,
+              'patch_sha256': hashlib.sha256(patch).hexdigest(),
+              'files': {path: subprocess.check_output(['git', 'rev-parse', 'HEAD:' + path]).decode().strip() for path in paths},
+          }
+          Path('reviewed-volume-manifest.json').write_text(json.dumps(manifest, indent=2))
+          print(json.dumps(manifest, indent=2))
+      - name: Run the portable fixtures
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S Sandboxie/core/dll/tests -B "$RUNNER_TEMP/volume-tests" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/volume-tests" --parallel 2
-          ctest --test-dir "$RUNNER_TEMP/volume-tests" --output-on-failure
-      - name: Commit and publish only the reviewed contribution
-        id: publish
-        shell: bash
-        env:
-          BASE: 487d56309fafe90e2771d4c9004333fe01b77094
-          BRANCH: fix/volume-serial-cache-20260906
-        run: |
-          set -euo pipefail
-          test "$(git branch --show-current)" = "$BRANCH"
-          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$BASE"
-          git config user.name Kizuno18
-          git config user.email 110933270+Kizuno18@users.noreply.github.com
-          git add CHANGELOG.md Sandboxie/core/dll/kernel.c Sandboxie/install/SbieSettings.ini Sandboxie/core/dll/tests
-          git diff --cached --check
-          git commit -m "Fix volume serial cache identity and preserve native query results"
-          git push origin "HEAD:refs/heads/$BRANCH"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          cmake -S Sandboxie/core/dll/tests -B "$RUNNER_TEMP/tests" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/tests" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/tests" --output-on-failure | tee reviewed-volume-linux-tests.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-volume-source
+          path: reviewed-volume-*
+          retention-days: 7
 
   windows-fixtures:
-    needs: publish
     runs-on: windows-2022
     timeout-minutes: 10
     strategy:
@@ -103,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.publish.outputs.commit }}
+          ref: 47811e71d00367326bef81b5281ab036a4a479b5
           persist-credentials: false
       - name: Configure the synthetic fixtures
         run: cmake -S Sandboxie/core/dll/tests -B fixture-build -G "Visual Studio 17 2022" -A ${{ matrix.architecture }}
@@ -113,7 +84,6 @@ jobs:
         run: ctest --test-dir fixture-build -C Release --output-on-failure
 
   core-build:
-    needs: publish
     runs-on: windows-2022
     timeout-minutes: 20
     strategy:
@@ -123,9 +93,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.publish.outputs.commit }}
+          ref: 47811e71d00367326bef81b5281ab036a4a479b5
           persist-credentials: false
       - uses: microsoft/setup-msbuild@v3
-      - name: Build the existing DLL and service solution without running it
+      - name: Build Win32 first for message generation and embedded low-level resources
+        shell: cmd
+        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
+      - name: Build the target DLL and service solution without running it
+        if: matrix.architecture != 'Win32'
         shell: cmd
         run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=${{ matrix.architecture }} /maxcpucount:2 /verbosity:minimal
