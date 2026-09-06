@@ -1,0 +1,35 @@
+name: Identity profile workbench
+
+on:
+  push:
+    branches: [work/identity-profile-validation-20260906]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 00ae8850d681962cf1864055c551faaf3ba77770
+          persist-credentials: false
+      - name: Package the unmodified source baseline
+        shell: python
+        run: |
+          import pathlib, subprocess, zipfile
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          extensions = {'.c', '.cpp', '.h', '.hpp', '.inl', '.pro', '.pri', '.sln', '.props', '.vcxproj', '.filters', '.ui', '.ini', '.md', '.yml', '.yaml', '.cmd', '.ps1', '.bat', '.txt'}
+          with zipfile.ZipFile('identity-source.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+              for name in paths:
+                  path = pathlib.Path(name)
+                  if name and path.is_file() and (path.suffix.lower() in extensions or path.name.startswith(('LICENSE', 'COPYING', '.editorconfig', '.gitattributes'))):
+                      archive.write(path, name)
+          print('Source baseline: 00ae8850d681962cf1864055c551faaf3ba77770')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: identity-source-baseline
+          path: identity-source.zip
+          retention-days: 1
