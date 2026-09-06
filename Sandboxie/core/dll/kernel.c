@@ -541,23 +541,25 @@ _FX BOOL Kernel_GetVolumeInformationByHandleW(HANDLE hFile, LPWSTR lpVolumeNameB
 		return Result;
 
 	DWORD RealSerial = *lpVolumeSerialNumber;
-	ULONG LastError;
-	THREAD_DATA* TlsData = Dll_GetTlsData(&LastError);
-	Dll_PushTlsNameBuffer(TlsData);
-	WCHAR* TruePath = NULL;
-	WCHAR* CopyPath = NULL;
+	ULONG LastError = GetLastError();
+	THREAD_DATA* TlsData = Dll_GetTlsData(NULL);
 	WCHAR DeviceName[MAX_PATH] = { 0 };
-	NTSTATUS Status = File_GetName(hFile, NULL, &TruePath, &CopyPath, NULL);
-	if (NT_SUCCESS(Status) && TruePath && _wcsnicmp(TruePath, L"\\Device\\", 8) == 0) {
-		WCHAR* End = wcschr(TruePath + 8, L'\\');
-		if (!End) End = wcschr(TruePath + 8, L'\0');
-		size_t Length = End - (TruePath + 8);
-		if (Length > 0 && Length < ARRAYSIZE(DeviceName)) {
-			wmemcpy(DeviceName, TruePath + 8, Length);
-			DeviceName[Length] = L'\0';
+	if (TlsData) {
+		Dll_PushTlsNameBuffer(TlsData);
+		WCHAR* TruePath = NULL;
+		WCHAR* CopyPath = NULL;
+		NTSTATUS Status = File_GetName(hFile, NULL, &TruePath, &CopyPath, NULL);
+		if (NT_SUCCESS(Status) && TruePath && _wcsnicmp(TruePath, L"\\Device\\", 8) == 0) {
+			WCHAR* End = wcschr(TruePath + 8, L'\\');
+			if (!End) End = wcschr(TruePath + 8, L'\0');
+			size_t Length = End - (TruePath + 8);
+			if (Length > 0 && Length < ARRAYSIZE(DeviceName)) {
+				wmemcpy(DeviceName, TruePath + 8, Length);
+				DeviceName[Length] = L'\0';
+			}
 		}
+		Dll_PopTlsNameBuffer(TlsData);
 	}
-	Dll_PopTlsNameBuffer(TlsData);
 
 	// Include the original serial so replacement media does not reuse a cached value.
 	WCHAR CacheKey[MAX_PATH + 10];

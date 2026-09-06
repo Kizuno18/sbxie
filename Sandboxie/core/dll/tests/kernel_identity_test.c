@@ -71,13 +71,20 @@ static DWORD RealSerials[8] = {42, 42, 42, 42, 42, 42, 42, 42};
 static const WCHAR* Serials[] = {L"1234-ABCD", L"5678-ABCD", L"", L"1234-ABCDE"};
 static BOOL WriteOnFailure;
 static BOOL ReturnNullName;
+static BOOL NoTls;
 static void MockSetLastError(ULONG value) { LastErrorValue = value; }
 #define SetLastError MockSetLastError
+#define GetLastError() LastErrorValue
 
 typedef struct { int depth; } THREAD_DATA;
 static THREAD_LOCAL THREAD_DATA Tls;
-static THREAD_DATA* Dll_GetTlsData(ULONG* last) { *last = LastErrorValue; return &Tls; }
-static void Dll_PushTlsNameBuffer(THREAD_DATA* data) { ++data->depth; }
+static THREAD_DATA* Dll_GetTlsData(ULONG* last)
+{
+	if (NoTls) return NULL;
+	if (last) *last = LastErrorValue;
+	return &Tls;
+}
+static void Dll_PushTlsNameBuffer(THREAD_DATA* data) { CHECK(data != NULL); ++data->depth; }
 static void Dll_PopTlsNameBuffer(THREAD_DATA* data) { CHECK(data->depth > 0); --data->depth; }
 static ULONG Dll_rand(void) { return ++RandomValue; }
 
@@ -215,6 +222,67 @@ static void Media(void)
 	CHECK(Query(6) == 0x5678ABCD);
 	puts("PASS: changed media serial and a handle reused for a different volume");
 }
+static void MissingTls(void)
+{
+	map_clear(&Kernel_DiskSN);
+	NoTls = TRUE;
+	int calls = NameCalls;
+	DWORD serial = Query(0);
+	CHECK(serial != RealSerials[0] && Query(0) == serial);
+	CHECK(NameCalls == calls && LastErrorValue == 321);
+	NoTls = FALSE;
+	CHECK(Query(0) == 0x1234ABCD && LastErrorValue == 321);
+	puts("PASS: unavailable TLS uses the unresolved-name fallback and preserves last error");
+}
+static int AllocationCalls;
+static int FailAllocation;
+static int LiveAllocations;
+static void* FailingAllocator(void* pool, size_t size)
+{
+	(void)pool;
+	if (++AllocationCalls == FailAllocation) return NULL;
+	void* value = malloc(size);
+	if (value) ++LiveAllocations;
+	return value;
+}
+static void CountingFree(void* pool, void* value)
+{
+	(void)pool;
+	if (value) --LiveAllocations;
+	free(value);
+}
+static void AllocationFailure(void)
+{
+	wcscpy(Paths[6], L"\\Device\\HarddiskVolume3");
+	RealSerials[6] = 42;
+	map_clear(&Kernel_DiskSN);
+	void* (*allocate)(void*, size_t) = Kernel_DiskSN.func_malloc;
+	void (*release)(void*, void*) = Kernel_DiskSN.func_free;
+	Kernel_DiskSN.func_malloc = FailingAllocator;
+	Kernel_DiskSN.func_free = CountingFree;
+	for (int failure = 1; failure <= 2; ++failure) {
+		AllocationCalls = 0;
+		FailAllocation = failure;
+		CHECK(Query(0) == 0x1234ABCD && LastErrorValue == 321);
+		CHECK(Kernel_DiskSN.nnodes == 0 && LiveAllocations == 0);
+		FailAllocation = 0;
+		CHECK(Query(0) == 0x1234ABCD && Kernel_DiskSN.nnodes == 1);
+		map_clear(&Kernel_DiskSN);
+		CHECK(LiveAllocations == 0);
+	}
+	AllocationCalls = 0;
+	FailAllocation = 1;
+	DWORD uncached = Query(6);
+	CHECK(Kernel_DiskSN.nnodes == 0);
+	FailAllocation = 0;
+	DWORD cached = Query(6);
+	CHECK(cached != uncached && Query(6) == cached);
+	map_clear(&Kernel_DiskSN);
+	CHECK(LiveAllocations == 0);
+	Kernel_DiskSN.func_malloc = allocate;
+	Kernel_DiskSN.func_free = release;
+	puts("PASS: node/bucket allocation failure, cleanup and retry; random persistence is not guaranteed on failure");
+}
 #ifdef _WIN32
 static DWORD WINAPI Worker(void* context)
 #else
@@ -249,7 +317,8 @@ int main(int argc, char** argv)
 	const char* test = argc > 1 ? argv[1] : "all";
 	if (argc > 2 || (strcmp(test, "all") && strcmp(test, "collisions")
 		&& strcmp(test, "failure") && strcmp(test, "names") && strcmp(test, "hash")
-		&& strcmp(test, "media") && strcmp(test, "concurrent"))) {
+		&& strcmp(test, "media") && strcmp(test, "concurrent")
+		&& strcmp(test, "tls") && strcmp(test, "allocation"))) {
 		fputs("Unknown test name or unexpected arguments\n", stderr);
 		return 2;
 	}
@@ -260,6 +329,8 @@ int main(int argc, char** argv)
 	if (!strcmp(test, "all") || !strcmp(test, "hash")) HashCollisions();
 	if (!strcmp(test, "all") || !strcmp(test, "media")) Media();
 	if (!strcmp(test, "all") || !strcmp(test, "concurrent")) Concurrent();
+	if (!strcmp(test, "all") || !strcmp(test, "tls")) MissingTls();
+	if (!strcmp(test, "all") || !strcmp(test, "allocation")) AllocationFailure();
 	map_clear(&Kernel_DiskSN);
 	DeleteCriticalSection(&Kernel_DiskSN_CritSec);
 	return 0;

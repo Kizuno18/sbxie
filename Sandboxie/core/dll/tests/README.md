@@ -32,11 +32,14 @@ cmake --build build/volume-tests-sanitized
 ctest --test-dir build/volume-tests-sanitized --output-on-failure
 ```
 
-The six CTest cases cover distinct volumes with equal original serials;
+The eight CTest cases cover distinct volumes with equal original serials;
 native failure outputs, last-error preservation, and optional output pointers;
 failed/null/oversized name resolution and legacy serial parsing; forced hash
 collisions between different-length string keys; a changed original media
 serial and handle reuse; and eight threads performing 48,000 cold-cache reads.
+Missing TLS uses the unresolved-name fallback without dereferencing a null
+context. Allocator fixtures cover node and bucket allocation failures, cleanup,
+retry, and the documented loss of random-fallback stability when storage fails.
 The checks remain enabled in Release builds.
 
 To reproduce a regression against another revision, pass its `kernel.c` to
@@ -71,3 +74,56 @@ Compare `GetVolumeInformationA`, `GetVolumeInformationW`, the by-handle query,
 and relevant native/storage/WMI queries independently. This patch does not add
 identity substitution to the other paths, change reported capacity, or hide a
 physical storage-device serial.
+
+## Read-only Windows probe
+
+`volume_identity_probe` is a separate executable built only on Windows. It calls
+real APIs rather than the fixture mocks: `GetVolumeInformationByHandleW`,
+`GetVolumeInformationW`, `GetVolumeInformationA`,
+`NtQueryVolumeInformationFile(FileFsVolumeInformation)`, and
+`GetFileInformationByHandle`. It opens an existing path for attributes, repeats
+each query 32 times, and checks duplicated and reopened handles. It does not
+install or load Sandboxie, change configuration, write files, or query physical
+storage serials. It is deliberately not an automatic CTest target.
+
+From its build directory, run a host smoke check against the current directory:
+
+```powershell
+.\Release\volume_identity_probe.exe --path . --require-coherent
+```
+
+For a disposable box already configured with a synthetic `DiskSerialNumber`,
+launch the same probe through the normal Sandboxie launcher:
+
+```text
+volume_identity_probe.exe --path . --require-sandbox --expect-by-handle 1234-ABCD
+```
+
+`--require-sandbox` rejects an absent `SbieDll.dll`; a loaded module alone is not
+proof that this hook is active or that the intended box was selected.
+`--expect-by-handle` requires the observed value to match the supplied test value.
+No supplied or observed serial, path, volume label, device name, or identifier
+hash is printed. Output is JSON containing booleans, availability and numeric
+error codes. Treat reports from sensitive environments as diagnostic data even
+though identifiers are suppressed. Use synthetic expected values only.
+
+A `null` comparison means unavailable or failed, not equality. By default,
+`requestedChecksPassed` covers the by-handle stability/handle checks and any
+explicit expected value; it does not mean all mechanisms are protected.
+`--require-coherent` additionally requires all five mechanisms to succeed, remain
+stable, and agree. A/W or native divergence in a protected box is reported, not
+silently hidden. Unrepresentable ANSI paths and native responses exceeding the
+fixed 4096-byte buffer are reported as unavailable/failed.
+
+Exit codes are 0 for satisfied requested checks, 1 for a failed requested check,
+and 2 for invalid input, preparation failure, or a missing required sandbox
+module. The probe has no persistent comparison store: run it in two boxes with
+different synthetic expected values, repeat in fresh processes and after
+restarts, and compare host baselines separately. A host smoke check is not a
+sandbox runtime result. Keep real identifiers private when collecting any
+additional local evidence for host noninterference.
+
+API contracts: [by-handle query](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew),
+[native query](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvolumeinformationfile),
+[native volume structure](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_fs_volume_information),
+and [file information](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle).
