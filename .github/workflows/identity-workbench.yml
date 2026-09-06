@@ -8,27 +8,45 @@ permissions:
   contents: read
 
 jobs:
-  tools:
+  recover:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - name: Install the standalone Qt test toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y qtbase5-dev
-      - name: Package headers and test tools
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Recover staged text without applying or executing it
         shell: python
         run: |
+          import base64
+          import hashlib
+          import json
+          import lzma
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          roots = [(Path('/usr/include/x86_64-linux-gnu/qt5'), 'include'), (Path('/usr/lib/qt5/bin'), 'bin'), (Path('/usr/lib/x86_64-linux-gnu/qt5/mkspecs'), 'mkspecs')]
-          with ZipFile('qt-profile-tools.zip', 'w', ZIP_DEFLATED) as out:
-              for root, prefix in roots:
-                  for path in root.rglob('*'):
-                      if path.is_file():
-                          out.write(path, str(Path(prefix) / path.relative_to(root)))
-              for path in Path('/usr/lib/x86_64-linux-gnu').glob('libQt5Test.so*'):
-                  out.write(path, 'lib/' + path.name)
+
+          paths = sorted(Path('.').glob('identity-patch-*.b64'))
+          text = ''.join(''.join(path.read_text().split()) for path in paths)
+          if len(text) > 8 * 1024 * 1024:
+              raise ValueError('Staged input exceeds the recovery limit')
+          raw = base64.b64decode(text, validate=True)
+          decoder = lzma.LZMADecompressor(memlimit=256 * 1024 * 1024)
+          recovered = decoder.decompress(raw, max_length=8 * 1024 * 1024)
+          report = {
+              'parts': [str(path) for path in paths],
+              'compressed_bytes': len(raw),
+              'recovered_bytes': len(recovered),
+              'complete_stream': decoder.eof,
+              'sha256': hashlib.sha256(recovered).hexdigest()
+          }
+          with ZipFile('identity-recovery.zip', 'w', ZIP_DEFLATED) as archive:
+              archive.writestr('recovered.txt', recovered)
+              archive.writestr('recovery.json', json.dumps(report, indent=2))
+              for path in paths:
+                  archive.write(path, path.name)
+          print(json.dumps(report, indent=2))
       - uses: actions/upload-artifact@v4
         with:
-          name: qt-profile-tools
-          path: qt-profile-tools.zip
+          name: identity-recovery
+          path: identity-recovery.zip
           retention-days: 1
