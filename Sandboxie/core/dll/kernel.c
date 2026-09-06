@@ -271,6 +271,8 @@ _FX BOOLEAN Kernel_Init()
 
 		InitializeCriticalSection(&Kernel_DiskSN_CritSec);
 		map_init(&Kernel_DiskSN, Dll_Pool);
+		Kernel_DiskSN.func_key_size = map_wcssize;
+		Kernel_DiskSN.func_match_key = map_wcsimatch;
 
 		void* GetVolumeInformationByHandleW = GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32, "GetVolumeInformationByHandleW");
 		if (GetVolumeInformationByHandleW) {
@@ -530,61 +532,58 @@ _FX LANGID Kernel_GetSystemDefaultLangID()
 
 BOOL hex_string_to_uint8_array(const wchar_t* str, unsigned char* output_array, size_t* output_length, BOOL swap_bytes);
 
-_FX BOOL Kernel_GetVolumeInformationByHandleW(HANDLE hFile, LPWSTR lpVolumeNameBuffer, DWORD nVolumeNameSize, LPDWORD lpVolumeSerialNumber,LPDWORD lpMaximumComponentLength, LPDWORD lpFileSystemFlags, LPWSTR  lpFileSystemNameBuffer, DWORD nFileSystemNameSize) 
+_FX BOOL Kernel_GetVolumeInformationByHandleW(HANDLE hFile, LPWSTR lpVolumeNameBuffer, DWORD nVolumeNameSize, LPDWORD lpVolumeSerialNumber, LPDWORD lpMaximumComponentLength, LPDWORD lpFileSystemFlags, LPWSTR lpFileSystemNameBuffer, DWORD nFileSystemNameSize)
 {
-	DWORD ourSerialNumber = 0;
+	BOOL Result = __sys_GetVolumeInformationByHandleW(hFile, lpVolumeNameBuffer, nVolumeNameSize,
+		lpVolumeSerialNumber, lpMaximumComponentLength, lpFileSystemFlags,
+		lpFileSystemNameBuffer, nFileSystemNameSize);
+	if (!Result || !lpVolumeSerialNumber)
+		return Result;
 
-	BOOL rtn = __sys_GetVolumeInformationByHandleW(hFile, lpVolumeNameBuffer, nVolumeNameSize, &ourSerialNumber, lpMaximumComponentLength, lpFileSystemFlags, lpFileSystemNameBuffer, nFileSystemNameSize);
-	if (lpVolumeSerialNumber != NULL) {
-
-        EnterCriticalSection(&Kernel_DiskSN_CritSec);
-
-		void* key = (void*)ourSerialNumber;
-
-		DWORD* lpCachedSerialNumber = map_get(&Kernel_DiskSN, key);
-		if (lpCachedSerialNumber)
-			*lpVolumeSerialNumber = *lpCachedSerialNumber;
-		else
-		{
-			WCHAR DeviceName[MAX_PATH] = { 0 };
-
-			ULONG LastError;
-			THREAD_DATA* TlsData;
-
-			TlsData = Dll_GetTlsData(&LastError);
-			Dll_PushTlsNameBuffer(TlsData);
-
-			WCHAR* TruePath, * CopyPath;
-			File_GetName(hFile, NULL, &TruePath, &CopyPath, NULL);
-
-			if (_wcsnicmp(TruePath, L"\\Device\\", 8) == 0)
-			{
-				WCHAR* End = wcschr(TruePath + 8, L'\\');
-				if(!End) End = wcschr(TruePath + 8, L'\0');
-				wcsncpy(DeviceName, TruePath + 8, End - (TruePath + 8));
-			}
-
-			Dll_PopTlsNameBuffer(TlsData);
-			SetLastError(LastError);
-
-			if(*DeviceName == 0)
-				*lpVolumeSerialNumber = Dll_rand();
-			else
-			{
-				WCHAR Value[30] = { 0 };
-				SbieDll_GetSettingsForName(NULL, DeviceName, L"DiskSerialNumber", Value, sizeof(Value), L"");
-				DWORD value_buf = 0;;
-				size_t value_len = sizeof(value_buf);
-				if (hex_string_to_uint8_array(Value, &value_buf, &value_len, TRUE))
-					*lpVolumeSerialNumber = value_buf;
-				else 
-					*lpVolumeSerialNumber = Dll_rand();
-			}
-			
-			map_insert(&Kernel_DiskSN, key, lpVolumeSerialNumber, sizeof(DWORD));
+	DWORD RealSerial = *lpVolumeSerialNumber;
+	ULONG LastError;
+	THREAD_DATA* TlsData = Dll_GetTlsData(&LastError);
+	Dll_PushTlsNameBuffer(TlsData);
+	WCHAR* TruePath = NULL;
+	WCHAR* CopyPath = NULL;
+	WCHAR DeviceName[MAX_PATH] = { 0 };
+	NTSTATUS Status = File_GetName(hFile, NULL, &TruePath, &CopyPath, NULL);
+	if (NT_SUCCESS(Status) && TruePath && _wcsnicmp(TruePath, L"\\Device\\", 8) == 0) {
+		WCHAR* End = wcschr(TruePath + 8, L'\\');
+		if (!End) End = wcschr(TruePath + 8, L'\0');
+		size_t Length = End - (TruePath + 8);
+		if (Length > 0 && Length < ARRAYSIZE(DeviceName)) {
+			wmemcpy(DeviceName, TruePath + 8, Length);
+			DeviceName[Length] = L'\0';
 		}
-
-		LeaveCriticalSection(&Kernel_DiskSN_CritSec);
 	}
-	return rtn;
+	Dll_PopTlsNameBuffer(TlsData);
+
+	// Include the original serial so replacement media does not reuse a cached value.
+	WCHAR CacheKey[MAX_PATH + 10];
+	Sbie_snwprintf(CacheKey, ARRAYSIZE(CacheKey), L"%08X:%ls", RealSerial, DeviceName);
+	_wcslwr(CacheKey);
+
+	EnterCriticalSection(&Kernel_DiskSN_CritSec);
+	DWORD Serial;
+	DWORD* CachedSerial = map_get(&Kernel_DiskSN, CacheKey);
+	if (CachedSerial)
+		Serial = *CachedSerial;
+	else {
+		WCHAR Value[30] = { 0 };
+		if (*DeviceName)
+			SbieDll_GetSettingsForName(NULL, DeviceName, L"DiskSerialNumber", Value, sizeof(Value), L"");
+		DWORD ConfiguredSerial = 0;
+		size_t Length = sizeof(ConfiguredSerial);
+		if (hex_string_to_uint8_array(Value, (unsigned char*)&ConfiguredSerial, &Length, TRUE))
+			Serial = ConfiguredSerial;
+		else
+			Serial = Dll_rand();
+		map_insert(&Kernel_DiskSN, CacheKey, &Serial, sizeof(Serial));
+	}
+	LeaveCriticalSection(&Kernel_DiskSN_CritSec);
+
+	*lpVolumeSerialNumber = Serial;
+	SetLastError(LastError);
+	return Result;
 }
