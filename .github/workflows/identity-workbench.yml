@@ -37,6 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git show HEAD:volume-review-round2.patch > volume-review-round2.patch
           echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
           git -C source apply --check ../volume-review-round2.patch
           git -C source apply ../volume-review-round2.patch
@@ -59,7 +60,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: volume-round2-linux-${{ matrix.mode }}
-          path: fixture-*-results.txt
+          path: fixture*results.txt
           retention-days: 7
 
   windows:
@@ -82,6 +83,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git show HEAD:volume-review-round2.patch > volume-review-round2.patch
           echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
           git -C source apply --check ../volume-review-round2.patch
           git -C source apply ../volume-review-round2.patch
@@ -161,6 +163,7 @@ jobs:
           BRANCH: fix/volume-serial-cache-20260906
         run: |
           set -euo pipefail
+          git show HEAD:volume-review-round2.patch > volume-review-round2.patch
           echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
           cp volume-review-round2.patch "$RUNNER_TEMP/volume-round2.patch"
           test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$SOURCE_BASE"
