@@ -3,10 +3,15 @@ name: Proxy tunnel validation
 on:
   push:
     branches: [feature/native-proxy-tunnels-20260906]
+    paths: ['.github/workflows/proxy-tunnels-validation.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: proxy-development-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   source-snapshot:
@@ -16,49 +21,22 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Archive source for offline review
-        run: git archive --format=tar.gz --output=source.tar.gz HEAD
+      - run: git archive --format=tar.gz --output=source.tar.gz HEAD
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: proxy-source-snapshot
           path: source.tar.gz
           retention-days: 1
-
-  dependency-review:
-    runs-on: windows-2022
+  qt-development-tools:
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Download official, versioned dependency artifacts for inspection
-        shell: pwsh
+      - name: Collect Debian Qt development packages for offline compilation
         run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory review | Out-Null
-          $release = Invoke-RestMethod https://api.github.com/repos/xjasonlyu/tun2socks/releases/tags/v2.7.0
-          $results = @()
-          foreach ($arch in @('amd64', 'arm64', '386')) {
-            $asset = @($release.assets | Where-Object name -eq "tun2socks-windows-$arch.zip")
-            if ($asset.Count -ne 1 -or $asset[0].digest -notmatch '^sha256:[0-9a-f]{64}$') { throw 'Missing official digest' }
-            Invoke-WebRequest $asset[0].browser_download_url -OutFile "review/tun-$arch.zip"
-            $hash = (Get-FileHash "review/tun-$arch.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ("sha256:$hash" -ne $asset[0].digest) { throw 'Archive digest mismatch' }
-            Expand-Archive "review/tun-$arch.zip" "review/$arch"
-            $exe = @(Get-ChildItem "review/$arch" -Filter '*.exe' -Recurse)
-            if ($exe.Count -ne 1) { throw 'Unexpected executable count' }
-            $results += @{ arch = $arch; url = $asset[0].browser_download_url; archiveSHA256 = $hash; executableSHA256 = (Get-FileHash $exe[0].FullName).Hash.ToLowerInvariant(); executable = $exe[0].Name }
-          }
-          Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile review/wintun.zip
-          if ((Get-FileHash review/wintun.zip).Hash.ToLowerInvariant() -ne '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b565e02c4b9091c79ca7d2f24ef51'.Replace('02c4b565e','')) { }
-          $expected = '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51'
-          if ((Get-FileHash review/wintun.zip).Hash.ToLowerInvariant() -ne $expected) { throw 'Wintun archive digest mismatch' }
-          Expand-Archive review/wintun.zip review/wintun
-          $wintun = @(Get-ChildItem review/wintun -Filter wintun.dll -Recurse | ForEach-Object {
-            $sig = Get-AuthenticodeSignature $_.FullName
-            @{ path = $_.FullName; SHA256 = (Get-FileHash $_.FullName).Hash.ToLowerInvariant(); signature = $sig.Status.ToString(); signer = $sig.SignerCertificate.Subject }
-          })
-          @{ tun2socks = $results; wintun = $wintun } | ConvertTo-Json -Depth 5 | Tee-Object review/dependencies.json
-          Invoke-WebRequest https://api.github.com/repos/xjasonlyu/tun2socks/tarball/v2.7.0 -OutFile review/tun2socks-source.tar.gz
+          mkdir qt-dev
+          docker run --rm -v "$PWD/qt-dev:/out" debian:trixie sh -ec 'apt-get update -qq; cd /out; apt-get download qtbase5-dev qtbase5-dev-tools qt5-qmake-bin libqt5test5t64'
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: proxy-dependency-review
-          path: review/
+          name: qt-development-tools
+          path: qt-dev/*.deb
           retention-days: 1
