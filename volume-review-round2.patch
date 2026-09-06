@@ -1,0 +1,493 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 381c2b58beb524055fb37720412d906d723cfb4a..f06b1c71b9c10a71eedd81089d72aadc3aaf1fe3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
+ - added the `Show Future Settings` editor setting (enabled by default) to include future-version settings in SandMan INI completion candidates
+ 
+ ### Fixed
+-- fixed `HideDiskSerialNumber` sharing cached values between distinct native volumes with the same original serial; preserve native query failures and invalidate the cache key when the original media serial changes
++- fixed `HideDiskSerialNumber` sharing cached values between distinct native volumes with the same original serial; preserve native query failures and invalidate the cache key when the original media serial changes, and handle unavailable thread-local name storage
+ - fixed stale INI completion-popup candidate tooltips during editing and limited `Template`/`TemplateReject` tooltips to setting-name text
+ - fixed SandMan File Panel "Create Shortcut" producing a shortcut without a working directory, so the sandboxed program inherited SandMan's current directory and applications that open their data files by relative path failed to find them [#5542](https://github.com/sandboxie-plus/Sandboxie/issues/5542)
+ - fixed wrong return type ein sbiesvc
+diff --git a/Sandboxie/core/dll/kernel.c b/Sandboxie/core/dll/kernel.c
+index 233dbd86f226096ccd478eb2f75cdb6244939754..73afca8ca773bd530795bce0efb4853b28395ff9 100644
+--- a/Sandboxie/core/dll/kernel.c
++++ b/Sandboxie/core/dll/kernel.c
+@@ -541,23 +541,25 @@ _FX BOOL Kernel_GetVolumeInformationByHandleW(HANDLE hFile, LPWSTR lpVolumeNameB
+ 		return Result;
+ 
+ 	DWORD RealSerial = *lpVolumeSerialNumber;
+-	ULONG LastError;
+-	THREAD_DATA* TlsData = Dll_GetTlsData(&LastError);
+-	Dll_PushTlsNameBuffer(TlsData);
+-	WCHAR* TruePath = NULL;
+-	WCHAR* CopyPath = NULL;
++	ULONG LastError = GetLastError();
++	THREAD_DATA* TlsData = Dll_GetTlsData(NULL);
+ 	WCHAR DeviceName[MAX_PATH] = { 0 };
+-	NTSTATUS Status = File_GetName(hFile, NULL, &TruePath, &CopyPath, NULL);
+-	if (NT_SUCCESS(Status) && TruePath && _wcsnicmp(TruePath, L"\\Device\\", 8) == 0) {
+-		WCHAR* End = wcschr(TruePath + 8, L'\\');
+-		if (!End) End = wcschr(TruePath + 8, L'\0');
+-		size_t Length = End - (TruePath + 8);
+-		if (Length > 0 && Length < ARRAYSIZE(DeviceName)) {
+-			wmemcpy(DeviceName, TruePath + 8, Length);
+-			DeviceName[Length] = L'\0';
++	if (TlsData) {
++		Dll_PushTlsNameBuffer(TlsData);
++		WCHAR* TruePath = NULL;
++		WCHAR* CopyPath = NULL;
++		NTSTATUS Status = File_GetName(hFile, NULL, &TruePath, &CopyPath, NULL);
++		if (NT_SUCCESS(Status) && TruePath && _wcsnicmp(TruePath, L"\\Device\\", 8) == 0) {
++			WCHAR* End = wcschr(TruePath + 8, L'\\');
++			if (!End) End = wcschr(TruePath + 8, L'\0');
++			size_t Length = End - (TruePath + 8);
++			if (Length > 0 && Length < ARRAYSIZE(DeviceName)) {
++				wmemcpy(DeviceName, TruePath + 8, Length);
++				DeviceName[Length] = L'\0';
++			}
+ 		}
++		Dll_PopTlsNameBuffer(TlsData);
+ 	}
+-	Dll_PopTlsNameBuffer(TlsData);
+ 
+ 	// Include the original serial so replacement media does not reuse a cached value.
+ 	WCHAR CacheKey[MAX_PATH + 10];
+diff --git a/Sandboxie/core/dll/tests/CMakeLists.txt b/Sandboxie/core/dll/tests/CMakeLists.txt
+index 1a7d6a7acbfaa14bf19e5bdddf1f2ff13601fed2..fadefc178d25d03ad9f9862cb9682c6d51c0c589 100644
+--- a/Sandboxie/core/dll/tests/CMakeLists.txt
++++ b/Sandboxie/core/dll/tests/CMakeLists.txt
+@@ -21,6 +21,15 @@ endif()
+ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" AND NOT MSVC)
+     target_compile_options(kernel_identity_test PRIVATE -fgnu89-inline)
+ endif()
+-foreach(test collisions failure names hash media concurrent)
++foreach(test collisions failure names hash media concurrent tls allocation)
+     add_test(NAME volume_identity_${test} COMMAND kernel_identity_test ${test})
+ endforeach()
++
++if(WIN32)
++    add_executable(volume_identity_probe volume_identity_probe.c)
++    set_target_properties(volume_identity_probe PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
++    target_compile_definitions(volume_identity_probe PRIVATE _WIN32_WINNT=0x0601)
++    if(MINGW)
++        target_link_options(volume_identity_probe PRIVATE -municode)
++    endif()
++endif()
+diff --git a/Sandboxie/core/dll/tests/README.md b/Sandboxie/core/dll/tests/README.md
+index 9185d4cbd23e05894eed3e962450271f4c1a0bda..0d19b973849257732add802882f2cdb7edddf3b0 100644
+--- a/Sandboxie/core/dll/tests/README.md
++++ b/Sandboxie/core/dll/tests/README.md
+@@ -32,11 +32,14 @@ cmake --build build/volume-tests-sanitized
+ ctest --test-dir build/volume-tests-sanitized --output-on-failure
+ ```
+ 
+-The six CTest cases cover distinct volumes with equal original serials;
++The eight CTest cases cover distinct volumes with equal original serials;
+ native failure outputs, last-error preservation, and optional output pointers;
+ failed/null/oversized name resolution and legacy serial parsing; forced hash
+ collisions between different-length string keys; a changed original media
+ serial and handle reuse; and eight threads performing 48,000 cold-cache reads.
++Missing TLS uses the unresolved-name fallback without dereferencing a null
++context. Allocator fixtures cover node and bucket allocation failures, cleanup,
++retry, and the documented loss of random-fallback stability when storage fails.
+ The checks remain enabled in Release builds.
+ 
+ To reproduce a regression against another revision, pass its `kernel.c` to
+@@ -71,3 +74,56 @@ Compare `GetVolumeInformationA`, `GetVolumeInformationW`, the by-handle query,
+ and relevant native/storage/WMI queries independently. This patch does not add
+ identity substitution to the other paths, change reported capacity, or hide a
+ physical storage-device serial.
++
++## Read-only Windows probe
++
++`volume_identity_probe` is a separate executable built only on Windows. It calls
++real APIs rather than the fixture mocks: `GetVolumeInformationByHandleW`,
++`GetVolumeInformationW`, `GetVolumeInformationA`,
++`NtQueryVolumeInformationFile(FileFsVolumeInformation)`, and
++`GetFileInformationByHandle`. It opens an existing path for attributes, repeats
++each query 32 times, and checks duplicated and reopened handles. It does not
++install or load Sandboxie, change configuration, write files, or query physical
++storage serials. It is deliberately not an automatic CTest target.
++
++From its build directory, run a host smoke check against the current directory:
++
++```powershell
++.\Release\volume_identity_probe.exe --path . --require-coherent
++```
++
++For a disposable box already configured with a synthetic `DiskSerialNumber`,
++launch the same probe through the normal Sandboxie launcher:
++
++```text
++volume_identity_probe.exe --path . --require-sandbox --expect-by-handle 1234-ABCD
++```
++
++`--require-sandbox` rejects an absent `SbieDll.dll`; a loaded module alone is not
++proof that this hook is active or that the intended box was selected.
++`--expect-by-handle` requires the observed value to match the supplied test value.
++No supplied or observed serial, path, volume label, device name, or identifier
++hash is printed. Output is JSON containing booleans, availability and numeric
++error codes. Treat reports from sensitive environments as diagnostic data even
++though identifiers are suppressed. Use synthetic expected values only.
++
++A `null` comparison means unavailable or failed, not equality. By default,
++`requestedChecksPassed` covers the by-handle stability/handle checks and any
++explicit expected value; it does not mean all mechanisms are protected.
++`--require-coherent` additionally requires all five mechanisms to succeed, remain
++stable, and agree. A/W or native divergence in a protected box is reported, not
++silently hidden. Unrepresentable ANSI paths and native responses exceeding the
++fixed 4096-byte buffer are reported as unavailable/failed.
++
++Exit codes are 0 for satisfied requested checks, 1 for a failed requested check,
++and 2 for invalid input, preparation failure, or a missing required sandbox
++module. The probe has no persistent comparison store: run it in two boxes with
++different synthetic expected values, repeat in fresh processes and after
++restarts, and compare host baselines separately. A host smoke check is not a
++sandbox runtime result. Keep real identifiers private when collecting any
++additional local evidence for host noninterference.
++
++API contracts: [by-handle query](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew),
++[native query](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvolumeinformationfile),
++[native volume structure](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_fs_volume_information),
++and [file information](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle).
+diff --git a/Sandboxie/core/dll/tests/kernel_identity_test.c b/Sandboxie/core/dll/tests/kernel_identity_test.c
+index 61923c0202db6f3ee94d431d99926ebf78431c4f..99af8e2ad95a360663c23fa15a1e1c5054e70908 100644
+--- a/Sandboxie/core/dll/tests/kernel_identity_test.c
++++ b/Sandboxie/core/dll/tests/kernel_identity_test.c
+@@ -71,13 +71,20 @@ static DWORD RealSerials[8] = {42, 42, 42, 42, 42, 42, 42, 42};
+ static const WCHAR* Serials[] = {L"1234-ABCD", L"5678-ABCD", L"", L"1234-ABCDE"};
+ static BOOL WriteOnFailure;
+ static BOOL ReturnNullName;
++static BOOL NoTls;
+ static void MockSetLastError(ULONG value) { LastErrorValue = value; }
+ #define SetLastError MockSetLastError
++#define GetLastError() LastErrorValue
+ 
+ typedef struct { int depth; } THREAD_DATA;
+ static THREAD_LOCAL THREAD_DATA Tls;
+-static THREAD_DATA* Dll_GetTlsData(ULONG* last) { *last = LastErrorValue; return &Tls; }
+-static void Dll_PushTlsNameBuffer(THREAD_DATA* data) { ++data->depth; }
++static THREAD_DATA* Dll_GetTlsData(ULONG* last)
++{
++	if (NoTls) return NULL;
++	if (last) *last = LastErrorValue;
++	return &Tls;
++}
++static void Dll_PushTlsNameBuffer(THREAD_DATA* data) { CHECK(data != NULL); ++data->depth; }
+ static void Dll_PopTlsNameBuffer(THREAD_DATA* data) { CHECK(data->depth > 0); --data->depth; }
+ static ULONG Dll_rand(void) { return ++RandomValue; }
+ 
+@@ -215,6 +222,67 @@ static void Media(void)
+ 	CHECK(Query(6) == 0x5678ABCD);
+ 	puts("PASS: changed media serial and a handle reused for a different volume");
+ }
++static void MissingTls(void)
++{
++	map_clear(&Kernel_DiskSN);
++	NoTls = TRUE;
++	int calls = NameCalls;
++	DWORD serial = Query(0);
++	CHECK(serial != RealSerials[0] && Query(0) == serial);
++	CHECK(NameCalls == calls && LastErrorValue == 321);
++	NoTls = FALSE;
++	CHECK(Query(0) == 0x1234ABCD && LastErrorValue == 321);
++	puts("PASS: unavailable TLS uses the unresolved-name fallback and preserves last error");
++}
++static int AllocationCalls;
++static int FailAllocation;
++static int LiveAllocations;
++static void* FailingAllocator(void* pool, size_t size)
++{
++	(void)pool;
++	if (++AllocationCalls == FailAllocation) return NULL;
++	void* value = malloc(size);
++	if (value) ++LiveAllocations;
++	return value;
++}
++static void CountingFree(void* pool, void* value)
++{
++	(void)pool;
++	if (value) --LiveAllocations;
++	free(value);
++}
++static void AllocationFailure(void)
++{
++	wcscpy(Paths[6], L"\\Device\\HarddiskVolume3");
++	RealSerials[6] = 42;
++	map_clear(&Kernel_DiskSN);
++	void* (*allocate)(void*, size_t) = Kernel_DiskSN.func_malloc;
++	void (*release)(void*, void*) = Kernel_DiskSN.func_free;
++	Kernel_DiskSN.func_malloc = FailingAllocator;
++	Kernel_DiskSN.func_free = CountingFree;
++	for (int failure = 1; failure <= 2; ++failure) {
++		AllocationCalls = 0;
++		FailAllocation = failure;
++		CHECK(Query(0) == 0x1234ABCD && LastErrorValue == 321);
++		CHECK(Kernel_DiskSN.nnodes == 0 && LiveAllocations == 0);
++		FailAllocation = 0;
++		CHECK(Query(0) == 0x1234ABCD && Kernel_DiskSN.nnodes == 1);
++		map_clear(&Kernel_DiskSN);
++		CHECK(LiveAllocations == 0);
++	}
++	AllocationCalls = 0;
++	FailAllocation = 1;
++	DWORD uncached = Query(6);
++	CHECK(Kernel_DiskSN.nnodes == 0);
++	FailAllocation = 0;
++	DWORD cached = Query(6);
++	CHECK(cached != uncached && Query(6) == cached);
++	map_clear(&Kernel_DiskSN);
++	CHECK(LiveAllocations == 0);
++	Kernel_DiskSN.func_malloc = allocate;
++	Kernel_DiskSN.func_free = release;
++	puts("PASS: node/bucket allocation failure, cleanup and retry; random persistence is not guaranteed on failure");
++}
+ #ifdef _WIN32
+ static DWORD WINAPI Worker(void* context)
+ #else
+@@ -249,7 +317,8 @@ int main(int argc, char** argv)
+ 	const char* test = argc > 1 ? argv[1] : "all";
+ 	if (argc > 2 || (strcmp(test, "all") && strcmp(test, "collisions")
+ 		&& strcmp(test, "failure") && strcmp(test, "names") && strcmp(test, "hash")
+-		&& strcmp(test, "media") && strcmp(test, "concurrent"))) {
++		&& strcmp(test, "media") && strcmp(test, "concurrent")
++		&& strcmp(test, "tls") && strcmp(test, "allocation"))) {
+ 		fputs("Unknown test name or unexpected arguments\n", stderr);
+ 		return 2;
+ 	}
+@@ -260,6 +329,8 @@ int main(int argc, char** argv)
+ 	if (!strcmp(test, "all") || !strcmp(test, "hash")) HashCollisions();
+ 	if (!strcmp(test, "all") || !strcmp(test, "media")) Media();
+ 	if (!strcmp(test, "all") || !strcmp(test, "concurrent")) Concurrent();
++	if (!strcmp(test, "all") || !strcmp(test, "tls")) MissingTls();
++	if (!strcmp(test, "all") || !strcmp(test, "allocation")) AllocationFailure();
+ 	map_clear(&Kernel_DiskSN);
+ 	DeleteCriticalSection(&Kernel_DiskSN_CritSec);
+ 	return 0;
+diff --git a/Sandboxie/core/dll/tests/volume_identity_probe.c b/Sandboxie/core/dll/tests/volume_identity_probe.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..486518feec92dd924bedaae70a9559d9651a8c4b
+--- /dev/null
++++ b/Sandboxie/core/dll/tests/volume_identity_probe.c
+@@ -0,0 +1,218 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <winternl.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <wchar.h>
++
++#define COUNT(value) (sizeof(value) / sizeof((value)[0]))
++#define SAMPLE_COUNT 32
++
++typedef BOOL (WINAPI *PVolumeByHandle)(HANDLE, LPWSTR, DWORD, LPDWORD, LPDWORD, LPDWORD, LPWSTR, DWORD);
++typedef NTSTATUS (NTAPI *PQueryVolume)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, int);
++
++typedef struct {
++	LARGE_INTEGER CreationTime;
++	ULONG Serial;
++	ULONG LabelLength;
++	BOOLEAN SupportsObjects;
++	WCHAR Label[1];
++} SVolumeInformation;
++typedef char CheckSerialOffset[offsetof(SVolumeInformation, Serial) == 8 ? 1 : -1];
++typedef char CheckLabelOffset[offsetof(SVolumeInformation, Label) == 18 ? 1 : -1];
++
++typedef struct {
++	const char* Name;
++	BOOL Available;
++	BOOL Success;
++	BOOL Stable;
++	DWORD Serial;
++	DWORD Error;
++} SObservation;
++
++static PVolumeByHandle ByHandle;
++static PQueryVolume Native;
++static WCHAR Root[32768];
++static char AnsiRoot[65536];
++
++static const char* Boolean(BOOL value) { return value ? "true" : "false"; }
++
++static HANDLE OpenPath(const WCHAR* path)
++{
++	return CreateFileW(path, FILE_READ_ATTRIBUTES,
++		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
++		OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
++}
++
++static BOOL ReadSerial(int method, HANDLE file, DWORD* serial, DWORD* error)
++{
++	BOOL result = FALSE;
++	SetLastError(0);
++	switch (method) {
++	case 0:
++		result = ByHandle(file, NULL, 0, serial, NULL, NULL, NULL, 0);
++		break;
++	case 1:
++		result = GetVolumeInformationW(Root, NULL, 0, serial, NULL, NULL, NULL, 0);
++		break;
++	case 2:
++		result = GetVolumeInformationA(AnsiRoot, NULL, 0, serial, NULL, NULL, NULL, 0);
++		break;
++	case 3: {
++		union { LARGE_INTEGER Align; BYTE Data[4096]; } buffer = {0};
++		IO_STATUS_BLOCK io = {0};
++		NTSTATUS status = Native(file, &io, buffer.Data, sizeof(buffer.Data), 1);
++		if (status != 0 || io.Information < offsetof(SVolumeInformation, Label)
++			|| io.Information > sizeof(buffer.Data)) {
++			*error = status != 0 ? (DWORD)status : ERROR_INVALID_DATA;
++			return FALSE;
++		}
++		*serial = ((SVolumeInformation*)buffer.Data)->Serial;
++		*error = 0;
++		return TRUE;
++	}
++	case 4: {
++		BY_HANDLE_FILE_INFORMATION info;
++		result = GetFileInformationByHandle(file, &info);
++		if (result) *serial = info.dwVolumeSerialNumber;
++		break;
++	}
++	}
++	*error = result ? 0 : GetLastError();
++	return result;
++}
++
++static SObservation Observe(const char* name, int method, HANDLE file, BOOL available)
++{
++	SObservation observation = {name, available, FALSE, FALSE, 0, 0};
++	if (!available) return observation;
++	for (int sample = 0; sample < SAMPLE_COUNT; ++sample) {
++		DWORD serial;
++		if (!ReadSerial(method, file, &serial, &observation.Error)) return observation;
++		if (sample == 0) {
++			observation.Serial = serial;
++			observation.Stable = TRUE;
++		} else if (serial != observation.Serial) observation.Stable = FALSE;
++	}
++	observation.Success = TRUE;
++	return observation;
++}
++
++static const char* Same(const SObservation* first, const SObservation* second)
++{
++	if (!first->Success || !second->Success) return "null";
++	return Boolean(first->Serial == second->Serial);
++}
++
++static BOOL ParseSerial(const WCHAR* text, DWORD* value)
++{
++	size_t length = wcslen(text);
++	if (length != 8 && length != 9) return FALSE;
++	DWORD result = 0;
++	for (size_t i = 0; i < length; ++i) {
++		WCHAR c = text[i];
++		if (length == 9 && i == 4) { if (c != L'-') return FALSE; else continue; }
++		unsigned int digit;
++		if (c >= L'0' && c <= L'9') digit = c - L'0';
++		else if (c >= L'a' && c <= L'f') digit = c - L'a' + 10;
++		else if (c >= L'A' && c <= L'F') digit = c - L'A' + 10;
++		else return FALSE;
++		result = (result << 4) | digit;
++	}
++	*value = result;
++	return TRUE;
++}
++
++static int Error(const char* operation, DWORD code)
++{
++	printf("{\"version\":1,\"error\":\"%s\",\"code\":%lu}\n", operation, (unsigned long)code);
++	return 2;
++}
++
++int wmain(int argc, WCHAR** argv)
++{
++	const WCHAR* path = L".";
++	BOOL havePath = FALSE, haveExpected = FALSE, requireSandbox = FALSE, requireCoherent = FALSE;
++	DWORD expected = 0;
++	for (int i = 1; i < argc; ++i) {
++		if (!wcscmp(argv[i], L"--path") && !havePath && i + 1 < argc) {
++			path = argv[++i]; havePath = TRUE;
++		} else if (!wcscmp(argv[i], L"--expect-by-handle") && !haveExpected && i + 1 < argc) {
++			if (!ParseSerial(argv[++i], &expected)) return Error("invalid_expected_serial", ERROR_INVALID_PARAMETER);
++			haveExpected = TRUE;
++		} else if (!wcscmp(argv[i], L"--require-sandbox") && !requireSandbox) requireSandbox = TRUE;
++		else if (!wcscmp(argv[i], L"--require-coherent") && !requireCoherent) requireCoherent = TRUE;
++		else return Error("invalid_arguments", ERROR_INVALID_PARAMETER);
++	}
++
++	BOOL loaded = GetModuleHandleW(L"SbieDll.dll") != NULL;
++	if (requireSandbox && !loaded) return Error("sandbox_module_missing", ERROR_MOD_NOT_FOUND);
++	HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
++	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
++	ByHandle = (PVolumeByHandle)GetProcAddress(kernel, "GetVolumeInformationByHandleW");
++	Native = (PQueryVolume)GetProcAddress(ntdll, "NtQueryVolumeInformationFile");
++	HANDLE file = OpenPath(path);
++	if (file == INVALID_HANDLE_VALUE) return Error("open_path", GetLastError());
++
++	WCHAR finalPath[32768];
++	DWORD length = GetFinalPathNameByHandleW(file, finalPath, COUNT(finalPath), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
++	if (!length || length >= COUNT(finalPath)) {
++		DWORD code = length ? ERROR_INSUFFICIENT_BUFFER : GetLastError();
++		CloseHandle(file); return Error("resolve_path", code);
++	}
++	if (!GetVolumePathNameW(finalPath, Root, COUNT(Root))) {
++		DWORD code = GetLastError(); CloseHandle(file); return Error("resolve_volume", code);
++	}
++	BOOL usedDefault = FALSE;
++	BOOL utf8 = GetACP() == CP_UTF8;
++	BOOL ansi = WideCharToMultiByte(CP_ACP, utf8 ? 0 : WC_NO_BEST_FIT_CHARS,
++		Root, -1, AnsiRoot, COUNT(AnsiRoot), NULL, utf8 ? NULL : &usedDefault) > 0 && !usedDefault;
++	const char* names[] = {"by_handle", "path_w", "path_a", "native", "file_information"};
++	BOOL available[] = {ByHandle != NULL, TRUE, ansi, Native != NULL, TRUE};
++	SObservation observations[5];
++	for (int method = 0; method < 5; ++method)
++		observations[method] = Observe(names[method], method, file, available[method]);
++
++	SObservation duplicate = {"duplicate", FALSE, FALSE, FALSE, 0, 0};
++	HANDLE other;
++	if (ByHandle && DuplicateHandle(GetCurrentProcess(), file, GetCurrentProcess(), &other, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
++		duplicate = Observe("duplicate", 0, other, TRUE);
++		CloseHandle(other);
++	}
++	CloseHandle(file);
++	other = OpenPath(finalPath);
++	SObservation reopened = {"reopened", FALSE, FALSE, FALSE, 0, 0};
++	if (other != INVALID_HANDLE_VALUE) {
++		if (ByHandle) reopened = Observe("reopened", 0, other, TRUE);
++		CloseHandle(other);
++	}
++
++	BOOL allSucceeded = TRUE, allStable = TRUE, coherent = TRUE;
++	for (int method = 0; method < 5; ++method) {
++		allSucceeded = allSucceeded && observations[method].Success;
++		allStable = allStable && observations[method].Stable;
++		coherent = coherent && observations[method].Serial == observations[0].Serial;
++	}
++	BOOL handleChecks = duplicate.Success && reopened.Success && duplicate.Stable && reopened.Stable
++		&& duplicate.Serial == observations[0].Serial && reopened.Serial == observations[0].Serial;
++	BOOL matchesExpected = observations[0].Success && observations[0].Stable && observations[0].Serial == expected;
++	BOOL passed = observations[0].Success && observations[0].Stable && handleChecks
++		&& (!haveExpected || matchesExpected) && (!requireCoherent || (allSucceeded && allStable && coherent));
++
++	printf("{\"version\":1,\"sbieDllLoaded\":%s,\"samplesPerQuery\":%d,\"queries\":{", Boolean(loaded), SAMPLE_COUNT);
++	for (int method = 0; method < 5; ++method) {
++		SObservation* item = &observations[method];
++		printf("%s\"%s\":{\"available\":%s,\"success\":%s,\"stable\":%s,\"error\":%lu}",
++			method ? "," : "", item->Name, Boolean(item->Available), Boolean(item->Success),
++			item->Success ? Boolean(item->Stable) : "null", (unsigned long)item->Error);
++	}
++	printf("},\"sameAsByHandle\":{\"path_w\":%s,\"path_a\":%s,\"native\":%s,\"file_information\":%s},",
++		Same(&observations[0], &observations[1]), Same(&observations[0], &observations[2]),
++		Same(&observations[0], &observations[3]), Same(&observations[0], &observations[4]));
++	printf("\"duplicateStable\":%s,\"reopenedStable\":%s,\"coherent\":%s,\"expectedSatisfied\":%s,\"requestedChecksPassed\":%s}\n",
++		duplicate.Success ? Boolean(duplicate.Stable && duplicate.Serial == observations[0].Serial) : "null",
++		reopened.Success ? Boolean(reopened.Stable && reopened.Serial == observations[0].Serial) : "null",
++		allSucceeded ? Boolean(allStable && coherent) : "null", haveExpected ? Boolean(matchesExpected) : "null", Boolean(passed));
++	return passed ? 0 : 1;
++}

@@ -3,87 +3,66 @@ name: Identity profile workbench
 on:
   push:
     branches: [work/identity-profile-validation-20260906]
-    paths: ['.github/workflows/identity-workbench.yml']
+    paths: ['.github/workflows/identity-workbench.yml', 'volume-review-round2.patch']
 
 permissions:
   contents: read
 
-jobs:
-  verify:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 47811e71d00367326bef81b5281ab036a4a479b5
-          fetch-depth: 2
-          persist-credentials: false
-      - name: Verify the published diff and package review evidence
-        shell: python
-        run: |
-          import hashlib
-          import json
-          import subprocess
-          from pathlib import Path
-          expected = {
-              'CHANGELOG.md',
-              'Sandboxie/core/dll/kernel.c',
-              'Sandboxie/install/SbieSettings.ini',
-              'Sandboxie/core/dll/tests/CMakeLists.txt',
-              'Sandboxie/core/dll/tests/README.md',
-              'Sandboxie/core/dll/tests/generate_identity_fixture.py',
-              'Sandboxie/core/dll/tests/kernel_identity_test.c',
-          }
-          parent = subprocess.check_output(['git', 'rev-parse', 'HEAD^']).decode().strip()
-          if parent != '487d56309fafe90e2771d4c9004333fe01b77094':
-              raise SystemExit('Unexpected contribution parent')
-          paths = subprocess.check_output(['git', 'diff', '--name-only', 'HEAD^', 'HEAD']).decode().splitlines()
-          if set(paths) != expected:
-              raise SystemExit('Unexpected contribution paths')
-          subprocess.run(['git', 'diff', '--check', 'HEAD^', 'HEAD'], check=True)
-          patch = subprocess.check_output(['git', 'diff', '--full-index', 'HEAD^', 'HEAD'])
-          Path('reviewed-volume-serial.patch').write_bytes(patch)
-          manifest = {
-              'commit': '47811e71d00367326bef81b5281ab036a4a479b5',
-              'parent': parent,
-              'patch_sha256': hashlib.sha256(patch).hexdigest(),
-              'files': {path: subprocess.check_output(['git', 'rev-parse', 'HEAD:' + path]).decode().strip() for path in paths},
-          }
-          Path('reviewed-volume-manifest.json').write_text(json.dumps(manifest, indent=2))
-          print(json.dumps(manifest, indent=2))
-      - name: Run the portable fixtures
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake -S Sandboxie/core/dll/tests -B "$RUNNER_TEMP/tests" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/tests" --parallel 2
-          ctest --test-dir "$RUNNER_TEMP/tests" --output-on-failure | tee reviewed-volume-linux-tests.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: reviewed-volume-source
-          path: reviewed-volume-*
-          retention-days: 7
+concurrency:
+  group: identity-volume-round2
+  cancel-in-progress: false
 
-  windows-fixtures:
-    runs-on: windows-2022
+env:
+  SOURCE_BASE: 47811e71d00367326bef81b5281ab036a4a479b5
+  PATCH_HASH: 042257a9497ba739982e393d91c3ef5554b44b51bfe54c6316e2721606ed2587
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        architecture: [Win32, x64]
+        mode: [release, sanitized]
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 47811e71d00367326bef81b5281ab036a4a479b5
           persist-credentials: false
-      - name: Configure the synthetic fixtures
-        run: cmake -S Sandboxie/core/dll/tests -B fixture-build -G "Visual Studio 17 2022" -A ${{ matrix.architecture }}
-      - name: Compile the fixtures
-        run: cmake --build fixture-build --config Release --parallel 2
-      - name: Run the fixtures without loading Sandboxie
-        run: ctest --test-dir fixture-build -C Release --output-on-failure
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Apply only the reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
+          git -C source apply --check ../volume-review-round2.patch
+          git -C source apply ../volume-review-round2.patch
+          git -C source add -N Sandboxie/core/dll/tests/volume_identity_probe.c
+          git -C source diff --check
+      - name: Compile and run the fixtures
+        shell: bash
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          args=(-DCMAKE_BUILD_TYPE=Release)
+          if [ "$MODE" = sanitized ]; then
+            args=(-DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer')
+          fi
+          cmake -S source/Sandboxie/core/dll/tests -B fixture-build "${args[@]}"
+          cmake --build fixture-build --parallel 2
+          ctest --test-dir fixture-build --output-on-failure | tee fixture-results.txt
+          ./fixture-build/kernel_identity_test all | tee fixture-all-results.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: volume-round2-linux-${{ matrix.mode }}
+          path: fixture-*-results.txt
+          retention-days: 7
 
-  core-build:
+  windows:
     runs-on: windows-2022
     timeout-minutes: 20
     strategy:
@@ -93,13 +72,128 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 47811e71d00367326bef81b5281ab036a4a479b5
           persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Apply only the reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
+          git -C source apply --check ../volume-review-round2.patch
+          git -C source apply ../volume-review-round2.patch
+          git -C source add -N Sandboxie/core/dll/tests/volume_identity_probe.c
+          git -C source diff --check
       - uses: microsoft/setup-msbuild@v3
-      - name: Build Win32 first for message generation and embedded low-level resources
+      - name: Build Win32 prerequisites
+        working-directory: source
         shell: cmd
         run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
-      - name: Build the target DLL and service solution without running it
+      - name: Build the requested DLL architecture
         if: matrix.architecture != 'Win32'
+        working-directory: source
         shell: cmd
         run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=${{ matrix.architecture }} /maxcpucount:2 /verbosity:minimal
+      - name: Build fixtures and the native probe
+        if: matrix.architecture == 'Win32' || matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          cmake -S source/Sandboxie/core/dll/tests -B fixture-build -G "Visual Studio 17 2022" -A ${{ matrix.architecture }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build fixture-build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir fixture-build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./fixture-build/Release/kernel_identity_test.exe all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise real host APIs without installing Sandboxie
+        if: matrix.architecture == 'Win32' || matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $probe = (Resolve-Path ./fixture-build/Release/volume_identity_probe.exe).Path
+          $testDirectory = Join-Path $env:RUNNER_TEMP ('volume-probe-' + [char]0xe9 + [char]0x6f22)
+          New-Item -ItemType Directory -Path $testDirectory | Out-Null
+          $testFile = Join-Path $testDirectory 'synthetic.txt'
+          Set-Content -LiteralPath $testFile -Value 'synthetic fixture'
+          $reports = @()
+          foreach ($path in @('.', $testDirectory, $testFile)) {
+            $raw = & $probe --path $path --require-coherent
+            if ($LASTEXITCODE -ne 0) { throw "Host probe returned $LASTEXITCODE : $raw" }
+            $report = $raw | ConvertFrom-Json
+            if ($report.sbieDllLoaded -or !$report.requestedChecksPassed -or !$report.coherent) { throw 'Invalid host probe result' }
+            if (@($report.queries.PSObject.Properties).Count -ne 5) { throw 'Missing query results' }
+            foreach ($query in $report.queries.PSObject.Properties) {
+              if (!$query.Value.available -or !$query.Value.success -or !$query.Value.stable) { throw 'Incomplete host query' }
+            }
+            $reports += $report
+          }
+          $raw = & $probe --require-sandbox
+          if ($LASTEXITCODE -ne 2 -or ($raw | ConvertFrom-Json).error -ne 'sandbox_module_missing') { throw 'Missing sandbox was not rejected' }
+          $raw = & $probe --expect-by-handle invalid
+          if ($LASTEXITCODE -ne 2 -or ($raw | ConvertFrom-Json).error -ne 'invalid_expected_serial') { throw 'Invalid expected serial was not rejected' }
+          $raw = & $probe --unknown
+          if ($LASTEXITCODE -ne 2 -or ($raw | ConvertFrom-Json).error -ne 'invalid_arguments') { throw 'Unknown option was not rejected' }
+          $reports | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 host-probe-results.json
+          Get-Content host-probe-results.json
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: matrix.architecture == 'Win32' || matrix.architecture == 'x64'
+        with:
+          name: volume-round2-host-${{ matrix.architecture }}
+          path: host-probe-results.json
+          retention-days: 7
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish the validated patch without rewriting history
+        shell: bash
+        env:
+          BRANCH: fix/volume-serial-cache-20260906
+        run: |
+          set -euo pipefail
+          echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
+          cp volume-review-round2.patch "$RUNNER_TEMP/volume-round2.patch"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$SOURCE_BASE"
+          git fetch --no-tags origin "$SOURCE_BASE"
+          git switch -c "$BRANCH" FETCH_HEAD
+          git apply --check "$RUNNER_TEMP/volume-round2.patch"
+          git apply "$RUNNER_TEMP/volume-round2.patch"
+          git add -N Sandboxie/core/dll/tests/volume_identity_probe.c
+          git diff --check
+          python - <<'PY'
+          import subprocess
+          expected = {
+              'CHANGELOG.md': 'f06b1c71b9c10a71eedd81089d72aadc3aaf1fe3',
+              'Sandboxie/core/dll/kernel.c': '73afca8ca773bd530795bce0efb4853b28395ff9',
+              'Sandboxie/core/dll/tests/CMakeLists.txt': 'fadefc178d25d03ad9f9862cb9682c6d51c0c589',
+              'Sandboxie/core/dll/tests/README.md': '0d19b973849257732add802882f2cdb7edddf3b0',
+              'Sandboxie/core/dll/tests/kernel_identity_test.c': '99af8e2ad95a360663c23fa15a1e1c5054e70908',
+              'Sandboxie/core/dll/tests/volume_identity_probe.c': '486518feec92dd924bedaae70a9559d9651a8c4b',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only']).decode().splitlines())
+          if changed != set(expected):
+              raise SystemExit('Unexpected changed paths')
+          for path, sha in expected.items():
+              actual = subprocess.check_output(['git', 'hash-object', path]).decode().strip()
+              if actual != sha:
+                  raise SystemExit('Reviewed blob mismatch: ' + path)
+          subprocess.run(['git', 'add', '--', *expected], check=True)
+          PY
+          test "$(git branch --show-current)" = "$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$SOURCE_BASE"
+          git diff --cached --check
+          git config user.name Kizuno18
+          git config user.email 110933270+Kizuno18@users.noreply.github.com
+          git commit -m "Handle unavailable volume query state and add read-only probes"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          git rev-parse HEAD
