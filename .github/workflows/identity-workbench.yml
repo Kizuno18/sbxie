@@ -8,28 +8,27 @@ permissions:
   contents: read
 
 jobs:
-  source:
+  tools:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 00ae8850d681962cf1864055c551faaf3ba77770
-          persist-credentials: false
-      - name: Package the unmodified source baseline
+      - name: Install the standalone Qt test toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y qtbase5-dev
+      - name: Package headers and test tools
         shell: python
         run: |
-          import pathlib, subprocess, zipfile
-          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
-          extensions = {'.c', '.cpp', '.h', '.hpp', '.inl', '.pro', '.pri', '.sln', '.props', '.vcxproj', '.filters', '.ui', '.ini', '.md', '.yml', '.yaml', '.cmd', '.ps1', '.bat', '.txt'}
-          with zipfile.ZipFile('identity-source.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
-              for name in paths:
-                  path = pathlib.Path(name)
-                  if name and path.is_file() and (path.suffix.lower() in extensions or path.name.startswith(('LICENSE', 'COPYING', '.editorconfig', '.gitattributes'))):
-                      archive.write(path, name)
-          print('Source baseline: 00ae8850d681962cf1864055c551faaf3ba77770')
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          roots = [(Path('/usr/include/x86_64-linux-gnu/qt5'), 'include'), (Path('/usr/lib/qt5/bin'), 'bin'), (Path('/usr/lib/x86_64-linux-gnu/qt5/mkspecs'), 'mkspecs')]
+          with ZipFile('qt-profile-tools.zip', 'w', ZIP_DEFLATED) as out:
+              for root, prefix in roots:
+                  for path in root.rglob('*'):
+                      if path.is_file():
+                          out.write(path, str(Path(prefix) / path.relative_to(root)))
+              for path in Path('/usr/lib/x86_64-linux-gnu').glob('libQt5Test.so*'):
+                  out.write(path, 'lib/' + path.name)
       - uses: actions/upload-artifact@v4
         with:
-          name: identity-source-baseline
-          path: identity-source.zip
+          name: qt-profile-tools
+          path: qt-profile-tools.zip
           retention-days: 1
