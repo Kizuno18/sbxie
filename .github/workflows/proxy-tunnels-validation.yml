@@ -1,0 +1,25 @@
+name: Proxy tunnel validation
+
+on:
+  push:
+    branches: [feature/native-proxy-tunnels-20260906]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Archive source for offline review
+        run: git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: proxy-source-snapshot
+          path: source.tar.gz
+          retention-days: 1
