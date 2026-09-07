@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 env:
-  SOURCE_HEAD: 06af52de
+  SOURCE_HEAD: 6ef86f5f
   SOURCE_BRANCH: feature/identity-profiles-20260907
-  EXPECTED_CASES: 27
+  EXPECTED_CASES: 28
 
 jobs:
   resolve:
