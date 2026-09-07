@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  SOURCE_HEAD: 52a7331
+  SOURCE_HEAD: 029261f
 
 jobs:
   resolve:
@@ -56,15 +56,15 @@ jobs:
           set -euo pipefail
           cmake -S source/SandboxiePlus/tests/ini-write -B tests-build -DCMAKE_BUILD_TYPE=Release -DQT_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt${{ matrix.qt }}
           cmake --build tests-build --parallel 2
-          ctest --test-dir tests-build --output-on-failure | tee round5-results.txt
-          grep -q '100% tests passed, 0 tests failed out of 32' round5-results.txt
+          ctest --test-dir tests-build --output-on-failure | tee round6-results.txt
+          grep -q '100% tests passed, 0 tests failed out of 38' round6-results.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: round5-qt${{ matrix.qt }}
+          name: round6-qt${{ matrix.qt }}
           path: |
-            round5-results.txt
-            round5-manifest.txt
+            round6-results.txt
+            round6-manifest.txt
             tests-build/Testing/Temporary/LastTest.log
           retention-days: 14
 
@@ -119,13 +119,13 @@ jobs:
           for ($i = 0; $i -lt $targets.Count; $i++) {
             $target = $targets[$i]
             foreach ($case in ($groups[$i].Groups[1].Value -split '\s+')) {
-              & "./fixture-$target/$target.exe" $case | Tee-Object -FilePath round5-results.txt -Append
-              if ($LASTEXITCODE -ne 0) { "FAIL: $case" | Tee-Object -FilePath round5-results.txt -Append; exit $LASTEXITCODE }
-              "PASS: $case" | Tee-Object -FilePath round5-results.txt -Append
+              & "./fixture-$target/$target.exe" $case | Tee-Object -FilePath round6-results.txt -Append
+              if ($LASTEXITCODE -ne 0) { "FAIL: $case" | Tee-Object -FilePath round6-results.txt -Append; exit $LASTEXITCODE }
+              "PASS: $case" | Tee-Object -FilePath round6-results.txt -Append
               $count++
             }
           }
-          if ($count -ne 32) { throw "Incomplete test selection: $count" }
+          if ($count -ne 38) { throw "Incomplete test selection: $count" }
       - name: Build Win32 prerequisites
         working-directory: source
         shell: cmd
@@ -138,13 +138,13 @@ jobs:
           if errorlevel 1 exit /b 1
           if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" exit /b 1
           if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\SandMan.exe" exit /b 1
-          certutil -hashfile "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" SHA256 >> "%GITHUB_WORKSPACE%\round5-manifest.txt"
-          certutil -hashfile "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\SandMan.exe" SHA256 >> "%GITHUB_WORKSPACE%\round5-manifest.txt"
+          certutil -hashfile "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" SHA256 >> "%GITHUB_WORKSPACE%\round6-manifest.txt"
+          certutil -hashfile "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\SandMan.exe" SHA256 >> "%GITHUB_WORKSPACE%\round6-manifest.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: round5-windows
+          name: round6-windows
           path: |
-            round5-results.txt
-            round5-manifest.txt
+            round6-results.txt
+            round6-manifest.txt
           retention-days: 14

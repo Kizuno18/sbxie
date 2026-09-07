@@ -9,7 +9,7 @@ def verify(root):
     head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD']).decode().strip()
     if head != EXPECTED:
         raise SystemExit('Unexpected source revision ' + head)
-    Path('round5-manifest.txt').write_text('commit ' + head + '\n' + subprocess.check_output(['git', '-C', str(root), 'ls-tree', 'HEAD', '--', 'SandboxiePlus/SandMan/Windows/SettingsWindow.cpp', 'SandboxiePlus/SandMan/Windows/SettingsWindow.h', 'SandboxiePlus/tests/ini-write/raw_ini_test.cpp', 'SandboxiePlus/tests/ini-write/CMakeLists.txt']).decode())
+    Path('round6-manifest.txt').write_text('commit ' + head + '\n' + subprocess.check_output(['git', '-C', str(root), 'ls-tree', 'HEAD', '--', 'SandboxiePlus/SandMan/Windows/SettingsWindow.cpp', 'SandboxiePlus/SandMan/Windows/SettingsWindow.h', 'SandboxiePlus/tests/ini-write/raw_ini_test.cpp', 'SandboxiePlus/tests/ini-write/CMakeLists.txt']).decode())
 
 
 def projects(root):
