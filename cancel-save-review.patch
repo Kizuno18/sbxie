@@ -1,0 +1,162 @@
+diff --git a/SandboxiePlus/SandMan/Windows/OptionsWindow.cpp b/SandboxiePlus/SandMan/Windows/OptionsWindow.cpp
+index 00c207331f4f95db5fa786f0a2267cb6e0e96f25..1a7437d0c1eeceff6965cd3c53c7c07987aff613 100644
+--- a/SandboxiePlus/SandMan/Windows/OptionsWindow.cpp
++++ b/SandboxiePlus/SandMan/Windows/OptionsWindow.cpp
+@@ -1765,13 +1765,13 @@ void COptionsWindow::LoadIniSection()
+ 
+ bool COptionsWindow::SaveIniSection()
+ {
++	m_ConfigDirty = true; // A reported failure can still leave partially applied changes.
+ 	SB_STATUS Status = m_pBox->SbieIniSet(m_pBox->GetName(), "", m_pCodeEdit->GetCode());
+ 	if (!Status) {
+ 		theGUI->CheckResults(QList<SB_STATUS>() << Status, this);
+ 		return false;
+ 	}
+ 
+-	m_ConfigDirty = true;
+ 	return true;
+ }
+ 
+diff --git a/SandboxiePlus/tests/ini-write/CMakeLists.txt b/SandboxiePlus/tests/ini-write/CMakeLists.txt
+index d0e70f1d1fc4e7f394e13821c475b7ccf9ad0a17..30b33496ae80fae724c1deca005fb904171393d2 100644
+--- a/SandboxiePlus/tests/ini-write/CMakeLists.txt
++++ b/SandboxiePlus/tests/ini-write/CMakeLists.txt
+@@ -30,7 +30,7 @@ add_executable(raw_ini_test raw_ini_test.cpp raw_ini_under_test.inc raw_ini_retu
+ set_target_properties(raw_ini_test PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
+ target_include_directories(raw_ini_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+ target_link_libraries(raw_ini_test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+-foreach(case box-save box-apply box-ok box-dirty box-empty box-cancel global-save global-apply global-ok global-offline global-empty global-cancel global-structured box-partial global-partial)
++foreach(case box-save box-apply box-ok box-dirty box-empty box-cancel global-save global-apply global-ok global-offline global-empty global-cancel global-structured box-partial global-partial box-partial-cancel)
+     add_test(NAME raw_ini_${case} COMMAND raw_ini_test ${case})
+     set_tests_properties(raw_ini_${case} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+ endforeach()
+diff --git a/SandboxiePlus/tests/ini-write/README.md b/SandboxiePlus/tests/ini-write/README.md
+index 023e6ac1841302bd10f3f8babfc84077938019d0..03406ab6152beee37b748d0a50da41668e87dcd2 100644
+--- a/SandboxiePlus/tests/ini-write/README.md
++++ b/SandboxiePlus/tests/ini-write/README.md
+@@ -45,15 +45,21 @@ separate from these injected regression tests.
+ 
+ ## Raw INI editor regressions
+ 
+-A second executable, `raw_ini_test`, adds thirteen cases for the raw editor in
++A second executable, `raw_ini_test`, adds sixteen cases for the raw editor in
+ both the sandbox options and global settings dialogs. Save, Apply and OK must
+ retain the text, cursor selection, undo history and edit controls on a reported
+ write failure. They must not reload or close the dialog. Reconnecting and retrying
+ must submit the same Unicode text, comments, duplicate keys and ordering.
+ A disconnected global editor rejects the save without a write attempt. The
+-sandbox's structured-view dirty flag changes only after a successful raw write.
++sandbox's structured view is invalidated before each raw write attempt, because
++a reported failure may still leave the backend partially changed.
+ Explicit Cancel and successful empty-section writes keep their existing behavior.
+-Each case runs with tab navigation and tree navigation.
++Each case runs with tab navigation and tree navigation. Partial-write fixtures
++verify that the pending text survives a reported error and can be resubmitted.
++A separate case cancels after a partial failure, changes to a structured tab
++and verifies that the existing tab handler reloads the current configuration.
++Invalidating the structured view does not report success or reload over the
++active raw editor; it prevents stale fields after leaving it.
+ 
+ `generate_raw_fixture.py --source-root <other-SandboxiePlus-directory> <output>`
+ extracts both dialogs' raw save methods and their callers for before/after runs.
+diff --git a/SandboxiePlus/tests/ini-write/generate_raw_fixture.py b/SandboxiePlus/tests/ini-write/generate_raw_fixture.py
+index 48bb03340244f626669a9f4126130f41cfd0920a..570dea481804ba910e42158966a6d1028ba5140e 100644
+--- a/SandboxiePlus/tests/ini-write/generate_raw_fixture.py
++++ b/SandboxiePlus/tests/ini-write/generate_raw_fixture.py
+@@ -20,6 +20,8 @@ def main() -> None:
+             chunks.append(function)
+             if method in ('SaveIniSection', 'apply'):
+                 declarations.append('#define ' + name.upper() + '_' + method.upper() + '_RESULT ' + function.split()[0])
++    options = (args.source_root / "SandMan/Windows/OptionsWindow.cpp").read_text(encoding="utf-8-sig")
++    chunks.append(extract(options, re.escape("void COptionsWindow::OnTab(QWidget*")))
+     args.output.mkdir(parents=True, exist_ok=True)
+     (args.output / 'raw_ini_under_test.inc').write_text('\n\n'.join(chunks) + '\n', encoding='utf-8')
+     (args.output / 'raw_ini_return.inc').write_text('\n'.join(declarations) + '\n', encoding='utf-8')
+diff --git a/SandboxiePlus/tests/ini-write/raw_ini_test.cpp b/SandboxiePlus/tests/ini-write/raw_ini_test.cpp
+index c5610c02d4aefc0e85298d5828e2bebdcc278620..2106db0725cc84a573cba793d926b11dbcada989 100644
+--- a/SandboxiePlus/tests/ini-write/raw_ini_test.cpp
++++ b/SandboxiePlus/tests/ini-write/raw_ini_test.cpp
+@@ -89,6 +89,7 @@ struct SEditorWindow : QDialog {
+ 	bool m_HoldChange = false;
+ 	int Loads = 0, IniLoads = 0, Closed = 0, TabUpdates = 0, StructuredSaves = 0;
+ 	struct {
++		QWidget* tabEdit;
+ 		QTabWidget* tabs;
+ 		QPushButton* btnEditIni;
+ 		QPushButton* btnSaveIni;
+@@ -100,8 +101,9 @@ struct SEditorWindow : QDialog {
+ 	{
+ 		Gui.Errors.clear(); Gui.ErrorParent = nullptr; SMessageBox::Criticals = 0;
+ 		if (!tree) m_pTree = nullptr;
+-		ui = {&Tabs, &EditIni, &SaveIni, &CancelEdit, &Encrypt, &Buttons};
++		ui = {nullptr, &Tabs, &EditIni, &SaveIni, &CancelEdit, &Encrypt, &Buttons};
+ 		for (int i = 0; i < 7; ++i) Tabs.addTab(new QWidget(), QString::number(i));
++		ui.tabEdit = Tabs.widget(Tabs.count() - 1);
+ 		Tabs.widget(5)->setEnabled(false);
+ 		ui.buttonBox->button(QDialogButtonBox::Apply)->setEnabled(true);
+ 		Code.SetCode(QString::fromUtf8("# synthetic \xc3\xa9\xe6\xbc\xa2\nEnabled=y\nTest=a\nTest=b\n\n"));
+@@ -123,6 +125,9 @@ class COptionsWindow : public SEditorWindow {
+ public:
+ 	using SEditorWindow::SEditorWindow;
+ 	SBoxPointer m_pBox{&Storage};
++	QWidget* m_pCurrentTab = nullptr;
++	QString StructuredCode = Storage.Persisted;
++	void OnTab(QWidget*);
+ 	bool m_Template = false, m_GeneralChanged = false, m_ConfigDirty = false;
+ 	QString m_Password;
+ 	qint64 m_ImageSize = 0;
+@@ -135,7 +140,7 @@ public:
+ 	void OnCancelEdit();
+ 	void OnSetPassword() { CHECK(false); }
+ 	bool SaveConfig() { ++StructuredSaves; return true; }
+-	void LoadConfig() { ++Loads; m_ConfigDirty = false; }
++	void LoadConfig() { ++Loads; m_ConfigDirty = false; StructuredCode = Storage.Persisted; }
+ };
+ class CSettingsWindow : public SEditorWindow {
+ public:
+@@ -216,7 +221,7 @@ static void BoxDirty(bool tree)
+ 	Window.SetIniEdit(true);
+ 	Window.Storage.Fail = true;
+ 	Window.OnSaveIni();
+-	CHECK(!Window.m_ConfigDirty);
++	CHECK(Window.m_ConfigDirty);
+ 	Window.m_ConfigDirty = true;
+ 	Window.OnSaveIni();
+ 	CHECK(Window.m_ConfigDirty && Window.Storage.Writes == 2);
+@@ -298,6 +303,26 @@ template<class T> static void PartialFailureRetry(bool tree)
+ 	}
+ }
+ 
++static void PartialCancelReload(bool tree)
++{
++	COptionsWindow Window(tree);
++	Window.SetIniEdit(true);
++	const QString Pending = Window.Code.GetCode();
++	const QString Before = Window.StructuredCode;
++	Window.Storage.Fail = true;
++	Window.Storage.PartialWrite = true;
++	Window.OnSaveIni();
++	CHECK(Window.Storage.Writes == 1 && Window.Storage.Persisted != Before);
++	CHECK(Window.Code.GetCode() == Pending && Window.Loads == 0 && Window.Closed == 0);
++	CHECK(Gui.Errors.size() == 1 && Gui.Errors[0].Code == -123);
++	Window.OnCancelEdit();
++	CHECK(Window.Code.GetCode() == Window.Storage.Persisted && Window.Storage.Writes == 1);
++	Window.OnTab(Window.ui.tabs->widget(0));
++	CHECK(Window.Loads == 1 && Window.StructuredCode == Window.Storage.Persisted);
++	CHECK(Window.StructuredCode != Before && !Window.m_ConfigDirty);
++	CHECK(Window.Storage.Writes == 1 && Window.Closed == 0 && Gui.Errors.size() == 1);
++}
++
+ int main(int argc, char** argv)
+ {
+ 	QApplication App(argc, argv);
+@@ -311,7 +336,8 @@ int main(int argc, char** argv)
+ 		{"global-ok", [](bool tree) { FailureRetry<CSettingsWindow>(tree, "ok"); }},
+ 		{"global-offline", GlobalOffline}, {"global-empty", Empty<CSettingsWindow>},
+ 		{"global-cancel", Cancel<CSettingsWindow>}, {"global-structured", Structured},
+-		{"box-partial", PartialFailureRetry<COptionsWindow>}, {"global-partial", PartialFailureRetry<CSettingsWindow>}
++		{"box-partial", PartialFailureRetry<COptionsWindow>}, {"global-partial", PartialFailureRetry<CSettingsWindow>},
++		{"box-partial-cancel", PartialCancelReload}
+ 	};
+ 	if (argc != 2 || !Cases.contains(QString::fromUtf8(argv[1]))) return 2;
+ 	for (bool Tree : {false, true}) Cases.value(QString::fromUtf8(argv[1]))(Tree);
