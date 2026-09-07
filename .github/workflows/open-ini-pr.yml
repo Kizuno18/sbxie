@@ -1,0 +1,191 @@
+name: Open reviewed INI pull request
+
+on:
+  push:
+    branches: [work/open-ini-pr-20260907]
+    paths: ['.github/workflows/open-ini-pr.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'Kizuno18/sbxie' && github.actor == 'Kizuno18' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Create a short-lived authentication channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/pr-auth.pem" 2>/dev/null
+          openssl pkey -in "$RUNNER_TEMP/pr-auth.pem" -pubout -out "$RUNNER_TEMP/pr-auth-public.pem"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-auth-public-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr-auth-public.pem
+          retention-days: 1
+      - name: Authenticate and open only the reviewed draft
+        shell: python
+        env:
+          READ_TOKEN: ${{ github.token }}
+        run: |
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          opener = urllib.request.build_opener(NoRedirect)
+          private_key = Path(os.environ['RUNNER_TEMP']) / 'pr-auth.pem'
+          expected_sha = 'b594a279e7303d4a33b8e1adba8d6c9fa59ba8e1'
+          branch = 'fix/ini-write-errors-20260907'
+          result = {'created': False, 'head_sha_expected': expected_sha}
+          pat = None
+
+          def api(path, token, method='GET', payload=None):
+              if not path.startswith('/') or path.startswith('//'):
+                  raise ValueError('Invalid API path')
+              request = urllib.request.Request(
+                  'https://api.github.com' + path,
+                  data=None if payload is None else json.dumps(payload).encode('utf-8'),
+                  headers={'Accept': 'application/vnd.github+json',
+                           'Authorization': 'Bearer ' + token,
+                           'X-GitHub-Api-Version': '2022-11-28',
+                           'User-Agent': 'sbxie-pr-publication',
+                           'Content-Type': 'application/json'}, method=method)
+              try:
+                  with opener.open(request, timeout=30) as response:
+                      return response.status, json.load(response), dict(response.headers)
+              except urllib.error.HTTPError as error:
+                  try:
+                      value = json.loads(error.read())
+                  except Exception:
+                      value = {'message': 'Non-JSON API response'}
+                  return error.code, value, dict(error.headers)
+
+          def require(status, expected, payload, stage):
+              if status != expected:
+                  result.update(stage=stage, http_status=status,
+                                message=str(payload.get('message', 'Request failed'))[:400])
+                  raise RuntimeError(stage)
+
+          try:
+              ref = urllib.parse.quote('work/open-ini-pr-20260907', safe='')
+              control_path = '/repos/Kizuno18/sbxie/contents/.github/pr-publication-request.json?ref=' + ref
+              deadline = time.monotonic() + 540
+              while time.monotonic() < deadline:
+                  status, item, _ = api(control_path, os.environ['READ_TOKEN'])
+                  if status == 200:
+                      control = json.loads(base64.b64decode(item['content']))
+                      if str(control.get('run_id')) == os.environ['GITHUB_RUN_ID']:
+                          break
+                  elif status != 404:
+                      require(status, 200, item, 'read_publication_request')
+                  time.sleep(5)
+              else:
+                  raise TimeoutError('Authentication channel expired')
+              blob = control.get('sealed_blob_sha', '')
+              if not re.fullmatch(r'[0-9a-f]{40}', blob):
+                  raise ValueError('Invalid sealed blob reference')
+              status, item, _ = api('/repos/Kizuno18/sbxie/git/blobs/' + blob, os.environ['READ_TOKEN'])
+              require(status, 200, item, 'read_sealed_authentication')
+              ciphertext = base64.b64decode(item['content'])
+              if len(ciphertext) != 384:
+                  raise ValueError('Invalid authentication envelope size')
+              decoded = subprocess.run([
+                  'openssl', 'pkeyutl', '-decrypt', '-inkey', str(private_key),
+                  '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256',
+                  '-pkeyopt', 'rsa_mgf1_md:sha256'], input=ciphertext,
+                  capture_output=True, check=True).stdout
+              auth = json.loads(decoded)
+              if str(auth.get('run_id')) != os.environ['GITHUB_RUN_ID']:
+                  raise ValueError('Authentication belongs to another run')
+              pat = auth['token']
+              if not isinstance(pat, str) or not re.fullmatch(r'[A-Za-z0-9_]{40,255}', pat):
+                  raise ValueError('Invalid authentication format')
+              print('::add-mask::' + pat, flush=True)
+              del auth, decoded
+              private_key.unlink()
+
+              status, user, _ = api('/user', pat)
+              require(status, 200, user, 'authenticate_user')
+              result['authenticated_login'] = user.get('login')
+              if user.get('login', '').lower() != 'kizuno18':
+                  raise ValueError('Unexpected authenticated account')
+              status, source, _ = api('/repos/Kizuno18/sbxie/branches/' + urllib.parse.quote(branch, safe=''), pat)
+              require(status, 200, source, 'verify_source_branch')
+              if source['commit']['sha'] != expected_sha:
+                  raise ValueError('Source branch changed since review')
+              pulls = '/repos/sandboxie-plus/Sandboxie/pulls'
+              query = urllib.parse.urlencode({'state': 'all', 'head': 'Kizuno18:' + branch, 'per_page': 100})
+              status, existing, _ = api(pulls + '?' + query, pat)
+              require(status, 200, existing, 'check_existing_pull_request')
+              if existing:
+                  selected = existing[0]
+                  result.update(existing=True, number=selected['number'], url=selected['html_url'],
+                                state=selected['state'], draft=selected.get('draft'))
+              else:
+                  body = '''save errors could still end in a reload or a closed dialog, discarding the edits that had just failed to save
+
+          this propagates failed INI list and boolean writes, then keeps the sandbox options and raw INI editors open when saving fails
+
+          - `CSbieIni::UpdateTextList` and `SetBoolSafe` stop at the first failed mutation instead of continuing and returning success
+          - the sandbox options dialog stops apply/ok on reported write errors, without reloading over pending edits
+          - raw INI save/apply/ok in both dialogs preserve the text, selection and undo history on failure, and the global editor rejects a disconnected save without attempting a write
+
+          successful saves and explicit cancel keep their existing behavior — the raw editor still passes the original text to the existing writer, including comments, repeated keys and ordering
+
+          23 regression cases pass with Qt 5, Qt 6 and Windows x64/MSVC, including reconnect/retry and tab/tree navigation — AddressSanitizer/UndefinedBehaviorSanitizer also pass with leak detection disabled, and the real `QSbieAPI.dll` and `SandMan.exe` x64 builds pass through the project scripts
+
+          [validation run](https://github.com/Kizuno18/sbxie/actions/runs/34137042949)
+
+          the fixtures use real Qt widgets and extracted production methods with injected storage failures, not an actual disk fault or a running SbieSvc
+
+          this is not a transaction — earlier writes may already have succeeded, and there is no rollback or automatic retry — error propagation in structured global settings remains outside this change
+
+          keeping this as a draft for real service/disk-failure checks before merge
+          '''
+                  body = '\n'.join(line[10:] if line.startswith('          ') else line for line in body.splitlines()).strip() + '\n'
+                  payload = {'title': 'preserve pending edits when ini saves fail', 'body': body,
+                             'head': 'Kizuno18:' + branch, 'base': 'master',
+                             'draft': True, 'maintainer_can_modify': True}
+                  status, created, headers = api(pulls, pat, 'POST', payload)
+                  result['accepted_permissions'] = headers.get('X-Accepted-GitHub-Permissions')
+                  require(status, 201, created, 'create_pull_request')
+                  result.update(created=True, number=created['number'], url=created['html_url'],
+                                draft=created['draft'], head_sha=created['head']['sha'],
+                                base=created['base']['ref'], title=created['title'])
+                  status, confirmed, _ = api(pulls + '/' + str(created['number']), pat)
+                  require(status, 200, confirmed, 'confirm_created_pull_request')
+                  result['verified'] = (confirmed['head']['sha'] == expected_sha
+                      and confirmed['base']['repo']['full_name'] == 'sandboxie-plus/Sandboxie'
+                      and confirmed['draft'] and confirmed['title'] == payload['title']
+                      and confirmed['body'] == body)
+          except Exception as error:
+              result['error_type'] = type(error).__name__
+          finally:
+              private_key.unlink(missing_ok=True)
+              pat = None
+              Path('pr-outcome.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+              print(json.dumps(result, indent=2))
+      - name: Remove the temporary private key
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/pr-auth.pem"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr-publication-result-${{ github.run_id }}
+          path: pr-outcome.json
+          retention-days: 1
