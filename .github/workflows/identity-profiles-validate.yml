@@ -1,0 +1,129 @@
+name: Identity profiles validation
+
+on:
+  push:
+    branches: [work/identity-profiles-validate-20260907]
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_HEAD: 23b54d07
+  SOURCE_BRANCH: feature/identity-profiles-20260907
+  EXPECTED_CASES: 27
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BRANCH }}
+          fetch-depth: 1
+          persist-credentials: false
+      - id: sha
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          case "$sha" in ${SOURCE_HEAD}*) ;; *) echo "branch head $sha is not $SOURCE_HEAD" >&2; exit 1;; esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        qt: [5, 6]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Record the validated revision
+        run: |
+          set -euo pipefail
+          { echo "commit $(git rev-parse HEAD)"; git ls-tree HEAD -- SandboxiePlus/SandMan/Helpers/IdentityProfile.cpp SandboxiePlus/SandMan/Helpers/IdentityProfile.h SandboxiePlus/SandMan/Windows/IdentityProfilesDialog.cpp SandboxiePlus/SandMan/Windows/OptionsAdvanced.cpp SandboxiePlus/tests/identity-profile/identity_profile_test.cpp; } > identity-manifest.txt
+      - name: Install Qt
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          if [ "${{ matrix.qt }}" = 5 ]; then sudo apt-get install -y qtbase5-dev; else sudo apt-get install -y qt6-base-dev; fi
+      - name: Build and run the identity profile tests
+        run: |
+          set -euo pipefail
+          cmake -S SandboxiePlus/tests/identity-profile -B tests-build -DCMAKE_BUILD_TYPE=Release -DQT_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt${{ matrix.qt }}
+          cmake --build tests-build --parallel 2
+          ctest --test-dir tests-build --output-on-failure | tee identity-results.txt
+          grep -q "100% tests passed, 0 tests failed out of ${EXPECTED_CASES}" identity-results.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: identity-qt${{ matrix.qt }}
+          path: |
+            identity-results.txt
+            identity-manifest.txt
+            tests-build/Testing/Temporary/LastTest.log
+          retention-days: 14
+
+  windows:
+    needs: resolve
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Record the validated revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          { echo "commit $(git rev-parse HEAD)"; git ls-tree HEAD -- SandboxiePlus/SandMan/Helpers/IdentityProfile.cpp SandboxiePlus/SandMan/Helpers/IdentityProfile.h SandboxiePlus/SandMan/Windows/IdentityProfilesDialog.cpp SandboxiePlus/SandMan/Windows/OptionsAdvanced.cpp SandboxiePlus/SandMan/Forms/OptionsWindow.ui SandboxiePlus/tests/identity-profile/identity_profile_test.cpp; } > identity-manifest.txt
+      - uses: microsoft/setup-msbuild@v3
+      - name: Install the repository Qt and Jom packages
+        shell: cmd
+        run: |
+          call SandboxiePlus\install_qt.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          call Installer\buildVariables.cmd build_qt6
+          echo QT_TEST_PATH=%CD%\..\Qt\%qt_version%\msvc2022_64>>%GITHUB_ENV%
+          call SandboxiePlus\install_jom.cmd
+          if errorlevel 1 exit /b 1
+      - name: Build and run the identity profile tests with MSVC
+        shell: cmd
+        run: |
+          cmake -S SandboxiePlus\tests\identity-profile -B tests-build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=%QT_TEST_PATH%
+          if errorlevel 1 exit /b 1
+          cmake --build tests-build --config Release --parallel 2
+          if errorlevel 1 exit /b 1
+          set PATH=%QT_TEST_PATH%\bin;%PATH%
+          ctest --test-dir tests-build -C Release --output-on-failure > identity-results.txt 2>&1
+          set CTEST_RC=%ERRORLEVEL%
+          type identity-results.txt
+          if not %CTEST_RC%==0 exit /b %CTEST_RC%
+          findstr /C:"100%% tests passed, 0 tests failed out of %EXPECTED_CASES%" identity-results.txt >nul
+          if errorlevel 1 exit /b 1
+      - name: Build Win32 prerequisites
+        shell: cmd
+        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
+      - name: Build actual QSbieAPI and SandMan x64 components
+        shell: cmd
+        run: |
+          call SandboxiePlus\qmake_plus.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\SandboxiePlus\bin\x64\Release\SandMan.exe" exit /b 1
+          certutil -hashfile "%GITHUB_WORKSPACE%\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" SHA256 >> identity-manifest.txt
+          certutil -hashfile "%GITHUB_WORKSPACE%\SandboxiePlus\bin\x64\Release\SandMan.exe" SHA256 >> identity-manifest.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: identity-windows
+          path: |
+            identity-results.txt
+            identity-manifest.txt
+          retention-days: 14
