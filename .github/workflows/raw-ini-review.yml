@@ -1,0 +1,166 @@
+name: Raw INI editor review
+
+on:
+  push:
+    branches: [work/identity-profile-validation-20260906]
+    paths: ['.github/workflows/raw-ini-review.yml', 'raw-ini-review.py', 'raw-ini-review.patch.xz.b64']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: raw-ini-editor-review
+  cancel-in-progress: false
+
+env:
+  SOURCE_BASE: 04ce40a9ad4bbfbf164a48ff990813383bfa6ee8
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - qt: 5
+            mode: release
+          - qt: 6
+            mode: release
+          - qt: 6
+            mode: sanitized
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Verify and apply only the reviewed patch
+        run: python raw-ini-review.py source
+      - name: Install Qt for the fixture target
+        env:
+          QT_MAJOR: ${{ matrix.qt }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          if [ "$QT_MAJOR" = 5 ]; then sudo apt-get install -y qtbase5-dev; else sudo apt-get install -y qt6-base-dev; fi
+      - name: Build and execute all 23 cases
+        env:
+          QT_MAJOR: ${{ matrix.qt }}
+          MODE: ${{ matrix.mode }}
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          set -euo pipefail
+          args=(-DCMAKE_BUILD_TYPE=Release)
+          if [ "$MODE" = sanitized ]; then args=(-DCMAKE_BUILD_TYPE=Debug '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer' '-DCMAKE_EXE_LINKER_FLAGS=-no-pie'); fi
+          cmake -S source/SandboxiePlus/tests/ini-write -B fixture-build "${args[@]}" "-DQT_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt$QT_MAJOR"
+          cmake --build fixture-build --parallel 2
+          ctest --test-dir fixture-build --output-on-failure | tee raw-ini-results.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: raw-ini-qt${{ matrix.qt }}-${{ matrix.mode }}
+          path: |
+            raw-ini-results.txt
+            raw-ini-manifest.json
+            fixture-build/Testing/Temporary/LastTest.log
+            fixture-build/CMakeCache.txt
+          retention-days: 7
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Verify and apply only the reviewed patch
+        run: python raw-ini-review.py source
+      - uses: microsoft/setup-msbuild@v3
+      - name: Install the repository Qt and Jom packages
+        working-directory: source
+        shell: cmd
+        run: |
+          call SandboxiePlus\install_qt.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          call Installer\buildVariables.cmd build_qt6
+          echo QT_TEST_PATH=%CD%\..\Qt\%qt_version%\msvc2022_64>>%GITHUB_ENV%
+          call SandboxiePlus\install_jom.cmd
+          if errorlevel 1 exit /b 1
+      - name: Compile both fixtures through qmake
+        shell: cmd
+        run: |
+          python raw-ini-review.py projects
+          if errorlevel 1 exit /b 1
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          for %%T in (ini raw) do (
+            pushd fixture-%%T
+            "%QT_TEST_PATH%\bin\qmake.exe" fixture.pro
+            if errorlevel 1 exit /b 1
+            "%GITHUB_WORKSPACE%\Qt\Tools\QtCreator\bin\jom.exe" -j 2
+            if errorlevel 1 exit /b 1
+            popd
+          )
+      - name: Execute all 23 Windows cases
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:QT_TEST_PATH\bin;$env:PATH"
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $cases = @('list-delete','list-append','list-retry','list-noop','bool-delete','bool-success','checkbox-delete','options-failure','options-success','options-reported-failure')
+          foreach ($case in $cases) {
+            & ./fixture-ini/ini_write_test.exe $case | Tee-Object -FilePath raw-ini-results.txt -Append
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $cases = @('box-save','box-apply','box-ok','box-dirty','box-empty','box-cancel','global-save','global-apply','global-ok','global-offline','global-empty','global-cancel','global-structured')
+          foreach ($case in $cases) {
+            & ./fixture-raw/raw_ini_test.exe $case | Tee-Object -FilePath raw-ini-results.txt -Append
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build Win32 prerequisites
+        working-directory: source
+        shell: cmd
+        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
+      - name: Build actual SandMan and QSbieAPI x64 components
+        working-directory: source
+        shell: cmd
+        run: |
+          call SandboxiePlus\qmake_plus.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\SandMan.exe" exit /b 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: raw-ini-windows-x64
+          path: |
+            raw-ini-results.txt
+            raw-ini-manifest.json
+            fixture-ini/fixture.pro
+            fixture-raw/fixture.pro
+          retention-days: 7
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish the validated change without rewriting history
+        run: python raw-ini-review.py publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-ini-publication
+          path: published-raw-ini.json
+          retention-days: 7
