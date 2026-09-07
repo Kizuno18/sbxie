@@ -3,18 +3,17 @@ name: Identity profile workbench
 on:
   push:
     branches: [work/identity-profile-validation-20260906]
-    paths: ['.github/workflows/identity-workbench.yml', 'volume-review-round2.patch']
+    paths: ['.github/workflows/identity-workbench.yml', 'ini-workbench.py', 'ini-write-errors.patch.xz.b64']
 
 permissions:
   contents: read
 
 concurrency:
-  group: identity-volume-round2
+  group: identity-ini-write-review
   cancel-in-progress: false
 
 env:
-  SOURCE_BASE: 47811e71d00367326bef81b5281ab036a4a479b5
-  PATCH_HASH: 042257a9497ba739982e393d91c3ef5554b44b51bfe54c6316e2721606ed2587
+  SOURCE_BASE: 487d56309fafe90e2771d4c9004333fe01b77094
 
 jobs:
   linux:
@@ -23,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [release, sanitized]
+        qt: [5, 6]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -33,43 +32,39 @@ jobs:
           ref: ${{ env.SOURCE_BASE }}
           path: source
           persist-credentials: false
-      - name: Apply only the reviewed patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          git show HEAD:volume-review-round2.patch > volume-review-round2.patch
-          echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
-          git -C source apply --check ../volume-review-round2.patch
-          git -C source apply ../volume-review-round2.patch
-          git -C source add -N Sandboxie/core/dll/tests/volume_identity_probe.c
-          git -C source diff --check
-      - name: Compile and run the fixtures
+      - name: Verify and apply the reviewed contribution
+        run: python ini-workbench.py source
+      - name: Install the Qt test dependency
         shell: bash
         env:
-          MODE: ${{ matrix.mode }}
+          QT_MAJOR: ${{ matrix.qt }}
         run: |
           set -euo pipefail
-          args=(-DCMAKE_BUILD_TYPE=Release)
-          if [ "$MODE" = sanitized ]; then
-            args=(-DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer')
+          sudo apt-get update -qq
+          if [ "$QT_MAJOR" = 5 ]; then
+            sudo apt-get install -y qtbase5-dev
+          else
+            sudo apt-get install -y qt6-base-dev
           fi
-          cmake -S source/Sandboxie/core/dll/tests -B fixture-build "${args[@]}"
+      - name: Build and run all ten regression cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S source/SandboxiePlus/tests/ini-write -B fixture-build -DCMAKE_BUILD_TYPE=Release
           cmake --build fixture-build --parallel 2
-          ctest --test-dir fixture-build --output-on-failure | tee fixture-results.txt
-          ./fixture-build/kernel_identity_test all | tee fixture-all-results.txt
+          ctest --test-dir fixture-build --output-on-failure | tee ini-results.txt
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: volume-round2-linux-${{ matrix.mode }}
-          path: fixture*results.txt
+          name: ini-write-linux-qt${{ matrix.qt }}
+          path: |
+            ini-results.txt
+            fixture-build/Testing/Temporary/LastTest.log
           retention-days: 7
 
   windows:
     runs-on: windows-2022
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        architecture: [Win32, x64, ARM64, ARM64EC]
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,74 +74,50 @@ jobs:
           ref: ${{ env.SOURCE_BASE }}
           path: source
           persist-credentials: false
-      - name: Apply only the reviewed patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          git show HEAD:volume-review-round2.patch > volume-review-round2.patch
-          echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
-          git -C source apply --check ../volume-review-round2.patch
-          git -C source apply ../volume-review-round2.patch
-          git -C source add -N Sandboxie/core/dll/tests/volume_identity_probe.c
-          git -C source diff --check
+      - name: Verify and apply the reviewed contribution
+        run: python ini-workbench.py source
       - uses: microsoft/setup-msbuild@v3
-      - name: Build Win32 prerequisites
+      - name: Install the repository-pinned Qt package
         working-directory: source
         shell: cmd
-        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
-      - name: Build the requested DLL architecture
-        if: matrix.architecture != 'Win32'
-        working-directory: source
-        shell: cmd
-        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=${{ matrix.architecture }} /maxcpucount:2 /verbosity:minimal
-      - name: Build fixtures and the native probe
-        if: matrix.architecture == 'Win32' || matrix.architecture == 'x64'
+        run: |
+          call SandboxiePlus\install_qt.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          call Installer\buildVariables.cmd build_qt6
+          echo QT_TEST_PATH=%CD%\..\Qt\%qt_version%\msvc2022_64>>%GITHUB_ENV%
+      - name: Build and execute the Windows Qt regression cases
         shell: pwsh
         run: |
-          cmake -S source/Sandboxie/core/dll/tests -B fixture-build -G "Visual Studio 17 2022" -A ${{ matrix.architecture }}
+          $env:PATH = "$env:QT_TEST_PATH\bin;$env:PATH"
+          cmake -S source/SandboxiePlus/tests/ini-write -B fixture-build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_PREFIX_PATH=$env:QT_TEST_PATH"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build fixture-build --config Release --parallel 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir fixture-build -C Release --output-on-failure
+          ctest --test-dir fixture-build -C Release --output-on-failure | Tee-Object -FilePath ini-results.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & ./fixture-build/Release/kernel_identity_test.exe all
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Exercise real host APIs without installing Sandboxie
-        if: matrix.architecture == 'Win32' || matrix.architecture == 'x64'
-        shell: pwsh
+      - name: Build the existing Win32 prerequisites
+        working-directory: source
+        shell: cmd
+        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
+      - name: Install Jom using the repository script
+        working-directory: source
+        shell: cmd
+        run: SandboxiePlus\install_jom.cmd
+      - name: Build the actual QSbieAPI and SandMan x64 components
+        working-directory: source
+        shell: cmd
         run: |
-          $ErrorActionPreference = 'Stop'
-          $probe = (Resolve-Path ./fixture-build/Release/volume_identity_probe.exe).Path
-          $testDirectory = Join-Path $env:RUNNER_TEMP ('volume-probe-' + [char]0xe9 + [char]0x6f22)
-          New-Item -ItemType Directory -Path $testDirectory | Out-Null
-          $testFile = Join-Path $testDirectory 'synthetic.txt'
-          Set-Content -LiteralPath $testFile -Value 'synthetic fixture'
-          $reports = @()
-          foreach ($path in @('.', $testDirectory, $testFile)) {
-            $raw = & $probe --path $path --require-coherent
-            if ($LASTEXITCODE -ne 0) { throw "Host probe returned $LASTEXITCODE : $raw" }
-            $report = $raw | ConvertFrom-Json
-            if ($report.sbieDllLoaded -or !$report.requestedChecksPassed -or !$report.coherent) { throw 'Invalid host probe result' }
-            if (@($report.queries.PSObject.Properties).Count -ne 5) { throw 'Missing query results' }
-            foreach ($query in $report.queries.PSObject.Properties) {
-              if (!$query.Value.available -or !$query.Value.success -or !$query.Value.stable) { throw 'Incomplete host query' }
-            }
-            $reports += $report
-          }
-          $raw = & $probe --require-sandbox
-          if ($LASTEXITCODE -ne 2 -or ($raw | ConvertFrom-Json).error -ne 'sandbox_module_missing') { throw 'Missing sandbox was not rejected' }
-          $raw = & $probe --expect-by-handle invalid
-          if ($LASTEXITCODE -ne 2 -or ($raw | ConvertFrom-Json).error -ne 'invalid_expected_serial') { throw 'Invalid expected serial was not rejected' }
-          $raw = & $probe --unknown
-          if ($LASTEXITCODE -ne 2 -or ($raw | ConvertFrom-Json).error -ne 'invalid_arguments') { throw 'Unknown option was not rejected' }
-          $reports | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 host-probe-results.json
-          Get-Content host-probe-results.json
-          exit 0
+          call SandboxiePlus\qmake_plus.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\SandMan.exe" exit /b 1
       - uses: actions/upload-artifact@v4
-        if: matrix.architecture == 'Win32' || matrix.architecture == 'x64'
+        if: always()
         with:
-          name: volume-round2-host-${{ matrix.architecture }}
-          path: host-probe-results.json
+          name: ini-write-windows-x64
+          path: |
+            ini-results.txt
+            fixture-build/Testing/Temporary/LastTest.log
           retention-days: 7
 
   publish:
@@ -157,46 +128,5 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: Publish the validated patch without rewriting history
-        shell: bash
-        env:
-          BRANCH: fix/volume-serial-cache-20260906
-        run: |
-          set -euo pipefail
-          git show HEAD:volume-review-round2.patch > volume-review-round2.patch
-          echo "$PATCH_HASH  volume-review-round2.patch" | sha256sum --check
-          cp volume-review-round2.patch "$RUNNER_TEMP/volume-round2.patch"
-          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$SOURCE_BASE"
-          git fetch --no-tags origin "$SOURCE_BASE"
-          git switch -c "$BRANCH" FETCH_HEAD
-          git apply --check "$RUNNER_TEMP/volume-round2.patch"
-          git apply "$RUNNER_TEMP/volume-round2.patch"
-          git add -N Sandboxie/core/dll/tests/volume_identity_probe.c
-          git diff --check
-          python - <<'PY'
-          import subprocess
-          expected = {
-              'CHANGELOG.md': 'f06b1c71b9c10a71eedd81089d72aadc3aaf1fe3',
-              'Sandboxie/core/dll/kernel.c': '73afca8ca773bd530795bce0efb4853b28395ff9',
-              'Sandboxie/core/dll/tests/CMakeLists.txt': 'fadefc178d25d03ad9f9862cb9682c6d51c0c589',
-              'Sandboxie/core/dll/tests/README.md': '0d19b973849257732add802882f2cdb7edddf3b0',
-              'Sandboxie/core/dll/tests/kernel_identity_test.c': '99af8e2ad95a360663c23fa15a1e1c5054e70908',
-              'Sandboxie/core/dll/tests/volume_identity_probe.c': '486518feec92dd924bedaae70a9559d9651a8c4b',
-          }
-          changed = set(subprocess.check_output(['git', 'diff', '--name-only']).decode().splitlines())
-          if changed != set(expected):
-              raise SystemExit('Unexpected changed paths')
-          for path, sha in expected.items():
-              actual = subprocess.check_output(['git', 'hash-object', path]).decode().strip()
-              if actual != sha:
-                  raise SystemExit('Reviewed blob mismatch: ' + path)
-          subprocess.run(['git', 'add', '--', *expected], check=True)
-          PY
-          test "$(git branch --show-current)" = "$BRANCH"
-          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$SOURCE_BASE"
-          git diff --cached --check
-          git config user.name Kizuno18
-          git config user.email 110933270+Kizuno18@users.noreply.github.com
-          git commit -m "Handle unavailable volume query state and add read-only probes"
-          git push origin "HEAD:refs/heads/$BRANCH"
-          git rev-parse HEAD
+      - name: Publish the validated contribution without rewriting history
+        run: python ini-workbench.py publish
