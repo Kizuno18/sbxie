@@ -48,9 +48,11 @@ jobs:
           fi
       - name: Build and run all ten regression cases
         shell: bash
+        env:
+          QT_MAJOR: ${{ matrix.qt }}
         run: |
           set -euo pipefail
-          cmake -S source/SandboxiePlus/tests/ini-write -B fixture-build -DCMAKE_BUILD_TYPE=Release
+          cmake -S source/SandboxiePlus/tests/ini-write -B fixture-build -DCMAKE_BUILD_TYPE=Release "-DQT_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt$QT_MAJOR"
           cmake --build fixture-build --parallel 2
           ctest --test-dir fixture-build --output-on-failure | tee ini-results.txt
       - uses: actions/upload-artifact@v4
@@ -60,6 +62,7 @@ jobs:
           path: |
             ini-results.txt
             fixture-build/Testing/Temporary/LastTest.log
+            fixture-build/CMakeCache.txt
           retention-days: 7
 
   windows:
@@ -85,24 +88,45 @@ jobs:
           if errorlevel 1 exit /b 1
           call Installer\buildVariables.cmd build_qt6
           echo QT_TEST_PATH=%CD%\..\Qt\%qt_version%\msvc2022_64>>%GITHUB_ENV%
-      - name: Build and execute the Windows Qt regression cases
-        shell: pwsh
-        run: |
-          $env:PATH = "$env:QT_TEST_PATH\bin;$env:PATH"
-          cmake -S source/SandboxiePlus/tests/ini-write -B fixture-build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_PREFIX_PATH=$env:QT_TEST_PATH"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build fixture-build --config Release --parallel 2
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir fixture-build -C Release --output-on-failure | Tee-Object -FilePath ini-results.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build the existing Win32 prerequisites
-        working-directory: source
-        shell: cmd
-        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
       - name: Install Jom using the repository script
         working-directory: source
         shell: cmd
         run: SandboxiePlus\install_jom.cmd
+      - name: Build the Windows fixtures with the release-only Qt package
+        shell: cmd
+        run: |
+          python source\SandboxiePlus\tests\ini-write\generate_fixture.py fixture-build
+          if errorlevel 1 exit /b 1
+          >fixture-build\fixture.pro echo TEMPLATE = app
+          >>fixture-build\fixture.pro echo TARGET = ini_write_test
+          >>fixture-build\fixture.pro echo QT += widgets
+          >>fixture-build\fixture.pro echo CONFIG += console c++17 release
+          >>fixture-build\fixture.pro echo CONFIG -= debug debug_and_release app_bundle
+          >>fixture-build\fixture.pro echo DESTDIR = .
+          >>fixture-build\fixture.pro echo INCLUDEPATH += .
+          >>fixture-build\fixture.pro echo SOURCES += ../source/SandboxiePlus/tests/ini-write/ini_write_test.cpp
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cd fixture-build
+          "%QT_TEST_PATH%\bin\qmake.exe" -v
+          "%QT_TEST_PATH%\bin\qmake.exe" fixture.pro
+          if errorlevel 1 exit /b 1
+          "%GITHUB_WORKSPACE%\Qt\Tools\QtCreator\bin\jom.exe" -j 2
+          if errorlevel 1 exit /b 1
+      - name: Execute all ten Windows regression cases
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:QT_TEST_PATH\bin;$env:PATH"
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $cases = @('list-delete','list-append','list-retry','list-noop','bool-delete','bool-success','checkbox-delete','options-failure','options-success','options-reported-failure')
+          foreach ($case in $cases) {
+            & ./fixture-build/ini_write_test.exe $case | Tee-Object -FilePath ini-results.txt -Append
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build the existing Win32 prerequisites
+        working-directory: source
+        shell: cmd
+        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
       - name: Build the actual QSbieAPI and SandMan x64 components
         working-directory: source
         shell: cmd
@@ -117,7 +141,7 @@ jobs:
           name: ini-write-windows-x64
           path: |
             ini-results.txt
-            fixture-build/Testing/Temporary/LastTest.log
+            fixture-build/fixture.pro
           retention-days: 7
 
   publish:
