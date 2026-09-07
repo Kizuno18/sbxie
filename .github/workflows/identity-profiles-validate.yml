@@ -111,7 +111,7 @@ jobs:
           pushd fixture-identity
           "%QT_TEST_PATH%\bin\qmake.exe" fixture.pro
           if errorlevel 1 exit /b 1
-          "%GITHUB_WORKSPACE%\Qt\Tools\QtCreator\bin\jom.exe" -j 2
+          "%GITHUB_WORKSPACE%\..\Qt\Tools\QtCreator\bin\jom.exe" -j 2
           if errorlevel 1 exit /b 1
           popd
       - name: Run every case declared by the CMake target
