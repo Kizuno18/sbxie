@@ -1,0 +1,154 @@
+name: Raw INI cancellation review
+
+on:
+  push:
+    branches: [work/ini-partial-save-review-20260907]
+    paths: ['.github/workflows/ini-cancel-review.yml', 'cancel-save-review.py', 'cancel-save-review.patch']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: raw-ini-cancel-review
+  cancel-in-progress: false
+
+env:
+  SOURCE_BASE: ebaeaa84d7e1ef1623f663fdd5beb9f22ea7b619
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        qt: [5, 6]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Verify and apply only the reviewed patch
+        run: python cancel-save-review.py source
+      - name: Install Qt
+        env:
+          QT_MAJOR: ${{ matrix.qt }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          if [ "$QT_MAJOR" = 5 ]; then sudo apt-get install -y qtbase5-dev; else sudo apt-get install -y qt6-base-dev; fi
+      - name: Build and run the full regression target
+        run: |
+          set -euo pipefail
+          cmake -S source/SandboxiePlus/tests/ini-write -B tests-build -DCMAKE_BUILD_TYPE=Release -DQT_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt${{ matrix.qt }}
+          cmake --build tests-build --parallel 2
+          ctest --test-dir tests-build --output-on-failure | tee cancel-save-results.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cancel-save-qt${{ matrix.qt }}
+          path: |
+            cancel-save-results.txt
+            cancel-save-manifest.json
+            tests-build/Testing/Temporary/LastTest.log
+          retention-days: 7
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Verify and apply only the reviewed patch
+        run: python cancel-save-review.py source
+      - uses: microsoft/setup-msbuild@v3
+      - name: Install the repository Qt and Jom packages
+        working-directory: source
+        shell: cmd
+        run: |
+          call SandboxiePlus\install_qt.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          call Installer\buildVariables.cmd build_qt6
+          echo QT_TEST_PATH=%CD%\..\Qt\%qt_version%\msvc2022_64>>%GITHUB_ENV%
+          call SandboxiePlus\install_jom.cmd
+          if errorlevel 1 exit /b 1
+      - name: Build the fixture executables
+        shell: cmd
+        run: |
+          python partial-save-review.py projects
+          if errorlevel 1 exit /b 1
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          for %%T in (ini_write_test raw_ini_test) do (
+            pushd fixture-%%T
+            "%QT_TEST_PATH%\bin\qmake.exe" fixture.pro
+            if errorlevel 1 exit /b 1
+            "%GITHUB_WORKSPACE%\Qt\Tools\QtCreator\bin\jom.exe" -j 2
+            if errorlevel 1 exit /b 1
+            popd
+          )
+      - name: Run every case declared by the CMake target
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:QT_TEST_PATH\bin;$env:PATH"
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $definition = Get-Content source/SandboxiePlus/tests/ini-write/CMakeLists.txt -Raw
+          $groups = [regex]::Matches($definition, 'foreach\(case ([^\)]+)\)')
+          if ($groups.Count -ne 2) { throw 'Unexpected regression target structure' }
+          $targets = @('ini_write_test', 'raw_ini_test')
+          $count = 0
+          for ($i = 0; $i -lt $targets.Count; $i++) {
+            $target = $targets[$i]
+            foreach ($case in ($groups[$i].Groups[1].Value -split '\s+')) {
+              & "./fixture-$target/$target.exe" $case | Tee-Object -FilePath cancel-save-results.txt -Append
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $count++
+            }
+          }
+          if ($count -ne 26) { throw 'Incomplete test selection' }
+      - name: Build Win32 prerequisites
+        working-directory: source
+        shell: cmd
+        run: msbuild /t:build Sandboxie\SandboxDll.sln /p:Configuration=SbieRelease /p:Platform=Win32 /maxcpucount:2 /verbosity:minimal
+      - name: Build actual QSbieAPI and SandMan x64 components
+        working-directory: source
+        shell: cmd
+        run: |
+          call SandboxiePlus\qmake_plus.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\QSbieAPI.dll" exit /b 1
+          if not exist "%GITHUB_WORKSPACE%\source\SandboxiePlus\bin\x64\Release\SandMan.exe" exit /b 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cancel-save-windows
+          path: |
+            cancel-save-results.txt
+            cancel-save-manifest.json
+          retention-days: 7
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish only after tests and the real component build succeed
+        run: python cancel-save-review.py publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ini-round4-published
+          path: ini-round4-published.zip
+          retention-days: 7
