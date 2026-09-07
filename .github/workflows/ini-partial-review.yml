@@ -1,0 +1,171 @@
+name: INI partial-write review
+
+on:
+  push:
+    branches: [work/ini-partial-save-review-20260907]
+    paths: ['.github/workflows/ini-partial-review.yml', 'partial-save-review.py']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ini-partial-review
+  cancel-in-progress: false
+
+env:
+  SOURCE_BASE: b594a279e7303d4a33b8e1adba8d6c9fa59ba8e1
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        qt: [5, 6]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Verify and apply only the test changes
+        run: python partial-save-review.py source
+      - name: Install Qt
+        env:
+          QT_MAJOR: ${{ matrix.qt }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          if [ "$QT_MAJOR" = 5 ]; then sudo apt-get install -y qtbase5-dev; else sudo apt-get install -y qt6-base-dev; fi
+      - name: Run all 25 cases
+        run: |
+          set -euo pipefail
+          cmake -S source/SandboxiePlus/tests/ini-write -B tests-build -DCMAKE_BUILD_TYPE=Release -DQT_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt${{ matrix.qt }}
+          cmake --build tests-build --parallel 2
+          ctest --test-dir tests-build --output-on-failure | tee partial-save-results.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: partial-save-qt${{ matrix.qt }}
+          path: |
+            partial-save-results.txt
+            partial-save-reviewed.patch
+            partial-save-manifest.json
+            tests-build/Testing/Temporary/LastTest.log
+          retention-days: 7
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_BASE }}
+          path: source
+          persist-credentials: false
+      - name: Verify and apply only the test changes
+        run: python partial-save-review.py source
+      - name: Install the repository Qt and Jom packages
+        working-directory: source
+        shell: cmd
+        run: |
+          call SandboxiePlus\install_qt.cmd x64 build_qt6
+          if errorlevel 1 exit /b 1
+          call Installer\buildVariables.cmd build_qt6
+          echo QT_TEST_PATH=%CD%\..\Qt\%qt_version%\msvc2022_64>>%GITHUB_ENV%
+          call SandboxiePlus\install_jom.cmd
+          if errorlevel 1 exit /b 1
+      - name: Build both fixture executables
+        shell: cmd
+        run: |
+          python partial-save-review.py projects
+          if errorlevel 1 exit /b 1
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          for %%T in (ini_write_test raw_ini_test) do (
+            pushd fixture-%%T
+            "%QT_TEST_PATH%\bin\qmake.exe" fixture.pro
+            if errorlevel 1 exit /b 1
+            "%GITHUB_WORKSPACE%\Qt\Tools\QtCreator\bin\jom.exe" -j 2
+            if errorlevel 1 exit /b 1
+            popd
+          )
+      - name: Run all 25 Windows cases
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:QT_TEST_PATH\bin;$env:PATH"
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $cases = @('list-delete','list-append','list-retry','list-noop','bool-delete','bool-success','checkbox-delete','options-failure','options-success','options-reported-failure')
+          foreach ($case in $cases) {
+            & ./fixture-ini_write_test/ini_write_test.exe $case | Tee-Object -FilePath partial-save-results.txt -Append
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $cases = @('box-save','box-apply','box-ok','box-dirty','box-empty','box-cancel','global-save','global-apply','global-ok','global-offline','global-empty','global-cancel','global-structured','box-partial','global-partial')
+          foreach ($case in $cases) {
+            & ./fixture-raw_ini_test/raw_ini_test.exe $case | Tee-Object -FilePath partial-save-results.txt -Append
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: partial-save-windows
+          path: |
+            partial-save-results.txt
+            partial-save-manifest.json
+          retention-days: 7
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Apply the same changes to the unchanged contribution branch
+        env:
+          BRANCH: fix/ini-write-errors-20260907
+        run: |
+          set -euo pipefail
+          cp partial-save-review.py "$RUNNER_TEMP/review.py"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$SOURCE_BASE"
+          git fetch --no-tags origin "$SOURCE_BASE"
+          git switch -c "$BRANCH" FETCH_HEAD
+          python "$RUNNER_TEMP/review.py" .
+          test "$(git branch --show-current)" = "$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$SOURCE_BASE"
+          git add SandboxiePlus/tests/ini-write/raw_ini_test.cpp SandboxiePlus/tests/ini-write/CMakeLists.txt
+          git diff --cached --check
+          git config user.name Kizuno18
+          git config user.email 110933270+Kizuno18@users.noreply.github.com
+          git commit -m "Test raw INI retries after partially applied writes"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          git rev-parse HEAD > partial-save-commit.txt
+      - name: Package exact published sources and patches
+        shell: python
+        run: |
+          import subprocess
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          base = '487d56309fafe90e2771d4c9004333fe01b77094'
+          subprocess.run(['git', 'fetch', '--no-tags', '--depth=4', 'origin', 'fix/ini-write-errors-20260907'], check=True)
+          paths = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD']).decode().splitlines()
+          with ZipFile('ini-reviewed-source.zip', 'w', ZIP_DEFLATED) as archive:
+              for path in paths:
+                  archive.write(path, path)
+              archive.writestr('ini-write-complete.patch', subprocess.check_output(['git', 'diff', '--full-index', base, 'HEAD']))
+              archive.write('partial-save-commit.txt')
+              archive.write('partial-save-reviewed.patch')
+              archive.write('partial-save-manifest.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ini-reviewed-source
+          path: ini-reviewed-source.zip
+          retention-days: 7
