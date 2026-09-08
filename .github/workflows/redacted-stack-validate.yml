@@ -124,8 +124,8 @@ jobs:
           if ($groups.Count -ne 1) { throw 'Unexpected test target structure' }
           $count = 0
           foreach ($case in ($groups[0].Groups[1].Value -split '\s+' | Where-Object { $_ -ne '' })) {
-            $out = & "./fixture-redacted/redacted_stack_export_test.exe" $case 2>&1
-            $out | Tee-Object -FilePath redacted-results.txt -Append
+            $out = cmd /c "fixture-redacted\redacted_stack_export_test.exe $case 2>&1"
+            $out | ForEach-Object { $_.ToString() } | Tee-Object -FilePath redacted-results.txt -Append
             if ($LASTEXITCODE -ne 0) { "FAIL: $case" | Tee-Object -FilePath redacted-results.txt -Append; exit $LASTEXITCODE }
             "PASS: $case" | Tee-Object -FilePath redacted-results.txt -Append
             $count++
