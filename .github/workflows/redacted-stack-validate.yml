@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  SOURCE_HEAD: 7b699416
+  SOURCE_HEAD: d1429ad3
   SOURCE_BRANCH: feature/redacted-stacktrace-export
   EXPECTED_CASES: 16
 
