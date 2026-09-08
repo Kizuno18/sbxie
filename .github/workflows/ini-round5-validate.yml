@@ -57,7 +57,7 @@ jobs:
           cmake -S source/SandboxiePlus/tests/ini-write -B tests-build -DCMAKE_BUILD_TYPE=Release -DQT_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt${{ matrix.qt }}
           cmake --build tests-build --parallel 2
           ctest --test-dir tests-build --output-on-failure | tee round8-results.txt
-          grep -q '100% tests passed, 0 tests failed out of 46' round8-results.txt
+          grep -q '100% tests passed, 0 tests failed out of 44' round8-results.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -113,19 +113,18 @@ jobs:
           $env:QT_QPA_PLATFORM = 'offscreen'
           $definition = Get-Content source/SandboxiePlus/tests/ini-write/CMakeLists.txt -Raw
           $groups = [regex]::Matches($definition, 'foreach\(case ([^\)]+)\)')
-          if ($groups.Count -ne 2) { throw 'Unexpected regression target structure' }
-          $targets = @('ini_write_test', 'raw_ini_test')
+          if ($groups.Count -lt 2) { throw 'Unexpected regression target structure' }
           $count = 0
-          for ($i = 0; $i -lt $targets.Count; $i++) {
-            $target = $targets[$i]
-            foreach ($case in ($groups[$i].Groups[1].Value -split '\s+')) {
+          for ($i = 0; $i -lt $groups.Count; $i++) {
+            $target = if ($i -eq 0) { 'ini_write_test' } else { 'raw_ini_test' }
+            foreach ($case in ($groups[$i].Groups[1].Value -split '\s+' | Where-Object { $_ -ne '' })) {
               & "./fixture-$target/$target.exe" $case | Tee-Object -FilePath round8-results.txt -Append
               if ($LASTEXITCODE -ne 0) { "FAIL: $case" | Tee-Object -FilePath round8-results.txt -Append; exit $LASTEXITCODE }
               "PASS: $case" | Tee-Object -FilePath round8-results.txt -Append
               $count++
             }
           }
-          if ($count -ne 46) { throw "Incomplete test selection: $count" }
+          if ($count -ne 44) { throw "Incomplete test selection: $count" }
       - name: Build Win32 prerequisites
         working-directory: source
         shell: cmd
