@@ -118,6 +118,7 @@ jobs:
       - name: Run every case declared by the CMake target
         shell: pwsh
         run: |
+          $env:PATH = "$env:QT_TEST_PATH\bin;$env:PATH"
           $env:QT_QPA_PLATFORM = 'offscreen'
           $definition = Get-Content SandboxiePlus/tests/redacted-stack-export/CMakeLists.txt -Raw
           $groups = [regex]::Matches($definition, 'foreach\(case\s+([^\)]+)\)')
