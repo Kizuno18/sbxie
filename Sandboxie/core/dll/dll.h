@@ -602,8 +602,6 @@ BOOLEAN Gdi_InitZero(HMODULE module);
 
 void Gui_ResetClipCursor(void);
 
-void Gui_UninitMisc(void);
-
 
 //---------------------------------------------------------------------------
 // Functions (other)
