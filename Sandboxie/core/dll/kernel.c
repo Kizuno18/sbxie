@@ -228,51 +228,63 @@ _FX BOOLEAN Kernel_Init()
 	if (!Kernel_CommandLineW.Buffer) {
 		RTL_USER_PROCESS_PARAMETERS* ProcessParms = Proc_GetRtlUserProcessParameters();
 
-		if (!wcsstr(ProcessParms->CommandLine.Buffer, L" --type=")) {
+		WCHAR buf[CONF_LINE_LEN];
+		ULONG index = 0;
+		while (1) {
+			NTSTATUS status = SbieApi_QueryConfAsIs(NULL, L"InjectCmdLine", index, buf, ARRAYSIZE(buf));
+			if (!NT_SUCCESS(status)) break;
+			++index;
 
-			WCHAR buf[CONF_LINE_LEN];
-			ULONG index = 0;
-			while (1) {
-				NTSTATUS status = SbieApi_QueryConfAsIs(NULL, L"InjectCmdLine", index, buf, ARRAYSIZE(buf));
-				if (!NT_SUCCESS(status)) break;
-				++index;
+			WCHAR* ptr = wcschr(buf, L',');
+			if (!ptr) continue;
 
-				WCHAR* ptr = wcschr(buf, L',');
-				if (!ptr) continue;
+			*ptr++ = L'\0';
 
-				*ptr++ = L'\0';
+			if (_wcsicmp(Dll_ImageName, buf) == 0) {
 
-				if (_wcsicmp(Dll_ImageName, buf) == 0) {
+				const WCHAR* lpCommandLine = ProcessParms->CommandLine.Buffer;
+				const WCHAR* lpArguments = SbieDll_FindArgumentEnd(lpCommandLine);
+				SIZE_T commandLineLen = wcslen(lpCommandLine);
+				SIZE_T argumentsOffset = lpArguments - lpCommandLine;
+				SIZE_T injectLen = wcslen(ptr);
+				BOOLEAN addSpace = argumentsOffset &&
+					lpCommandLine[argumentsOffset - 1] != L' ';
+				SIZE_T newLength = commandLineLen + injectLen + addSpace;
 
-					const WCHAR* lpCommandLine = ProcessParms->CommandLine.Buffer;
-					const WCHAR* lpArguments = SbieDll_FindArgumentEnd(lpCommandLine);
-					if (lpArguments == NULL)
-						lpArguments = wcsrchr(lpCommandLine, L'\0');
+				if (!injectLen || newLength + 1 > 0xFFFF / sizeof(WCHAR))
+					break;
 
-					Kernel_CommandLineW.MaximumLength = ProcessParms->CommandLine.MaximumLength + (CONF_LINE_LEN + 8) * sizeof(WCHAR);
-					Kernel_CommandLineW.Buffer = LocalAlloc(LMEM_FIXED, Kernel_CommandLineW.MaximumLength);
+				UNICODE_STRING commandLineW;
+				ANSI_STRING commandLineA = { 0 };
+				commandLineW.MaximumLength = (USHORT)((newLength + 1) * sizeof(WCHAR));
+				commandLineW.Buffer = LocalAlloc(LMEM_FIXED, commandLineW.MaximumLength);
+				if (!commandLineW.Buffer)
+					break;
 
-					wmemcpy(Kernel_CommandLineW.Buffer, lpCommandLine, lpArguments - lpCommandLine);
-					Kernel_CommandLineW.Buffer[lpArguments - lpCommandLine] = 0;
+				wmemcpy(commandLineW.Buffer, lpCommandLine, argumentsOffset);
+				if (addSpace)
+					commandLineW.Buffer[argumentsOffset++] = L' ';
+				wmemcpy(commandLineW.Buffer + argumentsOffset, ptr, injectLen);
+				wmemcpy(commandLineW.Buffer + argumentsOffset + injectLen,
+					lpArguments, commandLineLen - (lpArguments - lpCommandLine) + 1);
+				commandLineW.Length = (USHORT)(newLength * sizeof(WCHAR));
 
-					if (Kernel_CommandLineW.Buffer[lpArguments - lpCommandLine - 1] != L' ')
-						wcscat(Kernel_CommandLineW.Buffer, L" ");
-					wcscat(Kernel_CommandLineW.Buffer, ptr);
-
-					wcscat(Kernel_CommandLineW.Buffer, lpArguments);
-
-					Kernel_CommandLineW.Length = wcslen(Kernel_CommandLineW.Buffer) * sizeof(WCHAR);
-
-					RtlUnicodeStringToAnsiString(&Kernel_CommandLineA, &Kernel_CommandLineW, TRUE);
-
-					void* GetCommandLineW = GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32, "GetCommandLineW");
-					SBIEDLL_HOOK(Kernel_, GetCommandLineW);
-
-					void* GetCommandLineA = GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32, "GetCommandLineA");
-					SBIEDLL_HOOK(Kernel_, GetCommandLineA);
-
+				status = RtlUnicodeStringToAnsiString(&commandLineA, &commandLineW, TRUE);
+				if (!NT_SUCCESS(status)) {
+					LocalFree(commandLineW.Buffer);
 					break;
 				}
+
+				Kernel_CommandLineW = commandLineW;
+				Kernel_CommandLineA = commandLineA;
+
+				void* GetCommandLineW = GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32, "GetCommandLineW");
+				SBIEDLL_HOOK(Kernel_, GetCommandLineW);
+
+				void* GetCommandLineA = GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32, "GetCommandLineA");
+				SBIEDLL_HOOK(Kernel_, GetCommandLineA);
+
+				break;
 			}
 		}
 	}
