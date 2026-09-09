@@ -183,6 +183,9 @@
     <ClCompile Include="Helpers\IdentityProfile.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
+    <ClCompile Include="Helpers\RedactedStackExport.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
     <ClCompile Include="Helpers\StorageInfo.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
@@ -238,6 +241,9 @@
       <Filter>Windows</Filter>
     </ClCompile>
     <ClCompile Include="Windows\IdentityProfilesDialog.cpp">
+      <Filter>Windows</Filter>
+    </ClCompile>
+    <ClCompile Include="Windows\StackExportDialog.cpp">
       <Filter>Windows</Filter>
     </ClCompile>
     <ClCompile Include="Windows\RenameSandboxDialog.cpp">
@@ -304,6 +310,9 @@
       <Filter>Helpers</Filter>
     </ClInclude>
     <ClInclude Include="Helpers\IdentityProfile.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="Helpers\RedactedStackExport.h">
       <Filter>Helpers</Filter>
     </ClInclude>
     <ClInclude Include="Helpers\StorageInfo.h">
@@ -439,6 +448,9 @@
       <Filter>Windows</Filter>
     </QtMoc>
     <QtMoc Include="Windows\IdentityProfilesDialog.h">
+      <Filter>Windows</Filter>
+    </QtMoc>
+    <QtMoc Include="Windows\StackExportDialog.h">
       <Filter>Windows</Filter>
     </QtMoc>
     <QtMoc Include="Windows\RenameSandboxDialog.h">

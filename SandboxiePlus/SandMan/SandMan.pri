@@ -23,6 +23,7 @@ HEADERS += ./stdafx.h \
     ./Helpers/WinAdmin.h \
     ./Helpers/WinHelper.h \
     ./Helpers/IdentityProfile.h \
+    ./Helpers/RedactedStackExport.h \
     ./Helpers/StorageInfo.h \
     ./Helpers/ReadDirectoryChanges.h \
     ./Helpers/ReadDirectoryChangesPrivate.h \
@@ -48,6 +49,7 @@ HEADERS += ./stdafx.h \
     ./Windows/CompressDialog.h \
     ./Windows/ExtractDialog.h \
     ./Windows/IdentityProfilesDialog.h \
+    ./Windows/StackExportDialog.h \
     ./Windows/RenameSandboxDialog.h \
     ./Engine/BoxEngine.h \
     ./Engine/ScriptManager.h \
@@ -84,6 +86,7 @@ SOURCES += ./main.cpp \
     ./Helpers/WinAdmin.cpp \
     ./Helpers/WinHelper.cpp \
     ./Helpers/IdentityProfile.cpp \
+    ./Helpers/RedactedStackExport.cpp \
     ./Helpers/StorageInfo.cpp \
     ./Helpers/ReadDirectoryChanges.cpp \
     ./Helpers/ReadDirectoryChangesPrivate.cpp \
@@ -109,6 +112,7 @@ SOURCES += ./main.cpp \
     ./Windows/CompressDialog.cpp \
     ./Windows/ExtractDialog.cpp \
     ./Windows/IdentityProfilesDialog.cpp \
+    ./Windows/StackExportDialog.cpp \
     ./Windows/RenameSandboxDialog.cpp \
     ./Engine/BoxEngine.cpp \
     ./Engine/ScriptManager.cpp \
