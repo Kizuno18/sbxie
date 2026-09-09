@@ -1845,9 +1845,13 @@ static HWND Gui_GetActiveWindow(void)
 
 static HWND Gui_GetForegroundWindow(void)
 {
-	if (Gui_AlwaysActive && Gui_PreviousActiveWindow && __sys_IsWindow(Gui_PreviousActiveWindow))
+	HWND hwnd = __sys_GetForegroundWindow();
+	DWORD pid = 0;
+	if (Gui_AlwaysActive &&
+			! (__sys_GetWindowThreadProcessId(hwnd, &pid) && pid == Dll_ProcessId) &&
+			Gui_PreviousActiveWindow && __sys_IsWindow(Gui_PreviousActiveWindow))
 		return Gui_PreviousActiveWindow;
-	return __sys_GetForegroundWindow();
+	return hwnd;
 }
 
 static HWND Gui_GetFocus(void)
@@ -1876,16 +1880,19 @@ static BOOL Gui_GetGUIThreadInfo(DWORD idThread, LPGUITHREADINFO lpgui)
 	BOOL ret;
 
 	//
-	// an idThread of 0 queries the foreground thread; under AlwaysActive the
-	// boxed thread is not really foreground, so the real call reports no
-	// active window and leaks the deactivation.  Query the boxed thread's
-	// own info instead and overwrite the reported active/focus windows with
-	// the always-active window
+	// an idThread of 0 queries the foreground thread.  When the foreground
+	// moved outside the process, query the boxed thread's own info and
+	// overwrite the reported active/focus windows with the always-active window
 	//
 
 	if (Gui_AlwaysActive && idThread == 0 && lpgui) {
 
 		HWND hwnd = NULL;
+		HWND hwndForeground = __sys_GetForegroundWindow();
+		DWORD pid = 0;
+
+		if (__sys_GetWindowThreadProcessId(hwndForeground, &pid) && pid == Dll_ProcessId)
+			return __sys_GetGUIThreadInfo(idThread, lpgui);
 
 		THREAD_DATA *TlsData = Dll_GetTlsData(NULL);
 		if (TlsData && TlsData->gui_active_window && __sys_IsWindow(TlsData->gui_active_window))
