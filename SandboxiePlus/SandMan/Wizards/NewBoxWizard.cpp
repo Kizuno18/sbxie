@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "NewBoxWizard.h"
+#include "PortableBoxIni.h"
 #include "../MiscHelpers/Common/Common.h"
 #include "../Windows/SettingsWindow.h"
 #include "../SandMan.h"
@@ -51,7 +52,6 @@ static QString DosizePath(const QString& Path)
         p = p.mid(4);
     return theAPI->Nt2DosPath(p);
 }
-
 
 CNewBoxWizard::CNewBoxWizard(bool bAlowTemp, QWidget *parent)
     : QWizard(parent)
@@ -154,21 +154,13 @@ SB_STATUS CNewBoxWizard::TryToCreateBox()
         else {
             QString Location = field("boxLocation").toString();
             portableDir = Location.isEmpty() ? GetDefaultLocation() : DosizePath(ExpandPathVariables(Location, BoxName));
-            QDir().mkpath(portableDir);
+            if (!QDir().mkpath(portableDir))
+                return SB_ERR(SB_Generic);
             portableIniPath = portableDir + "\\" + BoxName + ".ini";
         }
 
-        // Create the external .ini file skeleton
-        QFile file(portableIniPath);
-        if (!file.open(QFile::WriteOnly))
+        if (!CreatePortableBoxIni(portableIniPath, BoxName))
             return SB_ERR(SB_Generic);
-        file.write("#\n");
-        file.write("# Portable sandbox configuration file\n");
-        file.write("#\n");
-        file.write("\n");
-        file.write("[" + BoxName.toLatin1() + "]\n");
-        file.write("Enabled=y\n");
-        file.close();
 
         // Add ImportBox only – no [BoxName] in Sandboxie.ini, so no collision
         SB_STATUS importStatus = theAPI->GetGlobalSettings()->AppendText("ImportBox", portableIniPath);
@@ -176,18 +168,33 @@ SB_STATUS CNewBoxWizard::TryToCreateBox()
             QFile::remove(portableIniPath);
             return importStatus;
         }
-        theAPI->ReloadConfig();
-        theAPI->ReloadBoxes();
+
+        auto rollbackImport = [&](const SB_STATUS& failureStatus) {
+            SB_STATUS rollbackStatus = theAPI->GetGlobalSettings()->DelValue("ImportBox", portableIniPath);
+            if (rollbackStatus.IsError())
+                return rollbackStatus;
+
+            rollbackStatus = theAPI->ReloadConfig();
+            if (rollbackStatus.IsError())
+                return rollbackStatus;
+
+            if (!QFile::remove(portableIniPath))
+                return SB_ERR(SB_Generic);
+
+            return failureStatus;
+        };
+
+        Status = theAPI->ReloadConfig();
+        if (Status.IsError())
+            return rollbackImport(Status);
+
+        Status = theAPI->ReloadBoxes();
+        if (Status.IsError())
+            return rollbackImport(Status);
 
         pBox = theAPI->GetBoxByName(BoxName);
-        if (!pBox) {
-            QStringList Imports = theAPI->GetGlobalSettings()->GetTextList("ImportBox", false);
-            Imports.removeAll(portableIniPath);
-            theAPI->GetGlobalSettings()->UpdateTextList("ImportBox", Imports, false);
-            theAPI->ReloadConfig();
-            QFile::remove(portableIniPath);
-            return SB_ERR(SB_Generic);
-        }
+        if (!pBox)
+            return rollbackImport(SB_ERR(SB_Generic));
 
         Status = SB_OK;
     }
