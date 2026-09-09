@@ -2482,7 +2482,8 @@ void CSettingsWindow::OnInstallAddon()
 
 	QString Id = pItem->data(0, Qt::UserRole).toString();
 	SB_PROGRESS Status = theGUI->GetAddonManager()->TryInstallAddon(Id, this);
-	if (Status.GetStatus() == OP_ASYNC) connect(Status.GetValue().data(), SIGNAL(Finished()), this, SLOT(OnLoadAddon()));
+	if (Status.GetStatus() == OP_ASYNC)
+		connect(Status.GetValue().data(), &CSbieProgress::Finished, this, &CSettingsWindow::OnLoadAddon);
 }
 
 void CSettingsWindow::OnRemoveAddon()
@@ -2497,7 +2498,8 @@ void CSettingsWindow::OnRemoveAddon()
 		return;
 	}
 	SB_PROGRESS Status = theGUI->GetAddonManager()->TryRemoveAddon(Id, this);
-	if (Status.GetStatus() == OP_ASYNC) connect(Status.GetValue().data(), SIGNAL(Finished()), this, SLOT(OnLoadAddon()));
+	if (Status.GetStatus() == OP_ASYNC)
+		connect(Status.GetValue().data(), &CSbieProgress::Finished, this, &CSettingsWindow::OnLoadAddon);
 }
 
 void CSettingsWindow::OnBrowse()
