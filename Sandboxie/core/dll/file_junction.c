@@ -154,7 +154,7 @@ static FILE_JUNCTION_ENTRY *File_Junction_FindForward(
         // try the DOS form of the source path
         //
 
-        if (entry->src && entry->src_len <= PathLen &&
+        if (entry->src && entry->dst && entry->src_len <= PathLen &&
                 entry->src_len >= best_len &&
                 File_Junction_IsBoundary(Path, entry->src_len) &&
                 _wcsnicmp(Path, entry->src, entry->src_len) == 0) {
@@ -168,7 +168,8 @@ static FILE_JUNCTION_ENTRY *File_Junction_FindForward(
         // try the NT device form of the source path
         //
 
-        if (entry->src_nt && entry->src_nt_len <= PathLen &&
+        if (entry->src_nt && entry->dst_nt &&
+                entry->src_nt_len <= PathLen &&
                 entry->src_nt_len >= best_len &&
                 File_Junction_IsBoundary(Path, entry->src_nt_len) &&
                 _wcsnicmp(Path, entry->src_nt, entry->src_nt_len) == 0) {
@@ -208,7 +209,7 @@ static FILE_JUNCTION_ENTRY *File_Junction_FindReverse(
         // try the DOS form of the target path
         //
 
-        if (entry->dst && entry->dst_len <= PathLen &&
+        if (entry->dst && entry->src && entry->dst_len <= PathLen &&
                 entry->dst_len >= best_len &&
                 File_Junction_IsBoundary(Path, entry->dst_len) &&
                 _wcsnicmp(Path, entry->dst, entry->dst_len) == 0) {
@@ -222,7 +223,8 @@ static FILE_JUNCTION_ENTRY *File_Junction_FindReverse(
         // try the NT device form of the target path
         //
 
-        if (entry->dst_nt && entry->dst_nt_len <= PathLen &&
+        if (entry->dst_nt && entry->src_nt &&
+                entry->dst_nt_len <= PathLen &&
                 entry->dst_nt_len >= best_len &&
                 File_Junction_IsBoundary(Path, entry->dst_nt_len) &&
                 _wcsnicmp(Path, entry->dst_nt, entry->dst_nt_len) == 0) {
@@ -567,12 +569,16 @@ _FX void File_InitJunctions(void)
         }
 
         File_JunctionEntries = table;
-        entry = &File_JunctionEntries[File_JunctionCount++];
+        entry = &File_JunctionEntries[File_JunctionCount];
+        memzero(entry, sizeof(FILE_JUNCTION_ENTRY));
 
         entry->src = Dll_Alloc((src_len + 1) * sizeof(WCHAR));
         entry->dst = Dll_Alloc((dst_len + 1) * sizeof(WCHAR));
         if (! entry->src || ! entry->dst) {
-            File_JunctionCount = index - 1;
+            if (entry->src)
+                Dll_Free(entry->src);
+            if (entry->dst)
+                Dll_Free(entry->dst);
             break;
         }
 
@@ -590,11 +596,6 @@ _FX void File_InitJunctions(void)
         // (for example an unknown drive letter) the derived form is
         // left NULL and only the stored form matches.
         //
-
-        entry->src_nt = NULL;
-        entry->dst_nt = NULL;
-        entry->src_nt_len = 0;
-        entry->dst_nt_len = 0;
 
         if (File_Junction_IsNtPath(entry->src, entry->src_len)) {
 
@@ -700,6 +701,8 @@ _FX void File_InitJunctions(void)
         // still redirects any actual access to the real target
         //
 
+        ++File_JunctionCount;
+
         if (entry->src_nt && ! File_Junction_SourceExists(entry->src_nt))
             File_Junction_CreateSourceBoxCopy(entry->src_nt);
     }
@@ -763,7 +766,9 @@ _FX WCHAR *File_ApplyJunctionMap(THREAD_DATA *TlsData, WCHAR *TruePath)
 
     NewPath_len = dst_len + (TruePath_len - src_len);
 
-    NewPath = Dll_AllocTemp((NewPath_len + 1) * sizeof(WCHAR));
+    NewPath = Dll_AllocTemp((NewPath_len + 2) * sizeof(WCHAR));
+    if (! NewPath)
+        return TruePath;
 
     wmemmove(NewPath + dst_len, TruePath + src_len,
                 NewPath_len - dst_len + 1);
@@ -808,6 +813,8 @@ _FX WCHAR *File_ApplyJunctionMapReverse(
     NewPath_len = src_len + (Path_len - dst_len);
 
     NewPath = Dll_AllocTemp((NewPath_len + 1) * sizeof(WCHAR));
+    if (! NewPath)
+        return NULL;
 
     wmemmove(NewPath + src_len, Path + dst_len,
                 NewPath_len - src_len + 1);
