@@ -39,6 +39,14 @@ jobs:
                 },
               );
 
+              if (changedFiles.length < context.payload.pull_request.changed_files) {
+                core.setOutput('violations', '[]');
+                core.setFailed(
+                  `Unable to inspect all ${context.payload.pull_request.changed_files} changed files`,
+                );
+                return;
+              }
+
               const targetFiles = changedFiles.filter((file) =>
                 simplifiedChineseFiles.has(file.filename),
               );
