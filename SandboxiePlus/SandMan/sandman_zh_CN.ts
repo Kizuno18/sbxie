@@ -2152,7 +2152,7 @@ Note: The update check is often behind the latest GitHub release to ensure that 
     <name>COptionsWindow</name>
     <message>
         <location filename="Windows/OptionsWindow.cpp" line="191"/>
-        <source>Sandboxie-Plus - &apos;%1&apos; Options</source>
+        <source>Sandboxie Plus - &apos;%1&apos; Options</source>
         <translation>Sandboxie-Plus - &apos;%1&apos; 选项</translation>
     </message>
     <message>
@@ -4585,7 +4585,7 @@ This box &lt;a href=&quot;sbie://docs/privacy-mode&quot;&gt;prevents access to a
     <message>
         <location filename="SandMan.cpp" line="3866"/>
         <source>The supporter certificate is not valid for this build, please get an updated certificate</source>
-        <translation>此赞助者证书在该版本无效，请获取可用的新许可证%1，</translation>
+        <translation>此赞助者证书在该版本无效，请获取可用的新许可证</translation>
     </message>
     <message>
         <location filename="SandMan.cpp" line="3869"/>
@@ -6350,7 +6350,7 @@ Error: %1</source>
     <name>CSettingsWindow</name>
     <message>
         <location filename="Windows/SettingsWindow.cpp" line="205"/>
-        <source>Sandboxie-Plus - Global Settings</source>
+        <source>Sandboxie Plus - Global Settings</source>
         <oldsource>Sandboxie-Plus - Global Settings</oldsource>
         <translation>Sandboxie-Plus - 全局设置</translation>
     </message>
