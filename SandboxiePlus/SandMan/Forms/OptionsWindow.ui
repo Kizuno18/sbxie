@@ -2452,6 +2452,21 @@ When enabled, sandboxed and unsandboxed launch paths parse these extensions.</st
                    <string>Name</string>
                   </property>
                  </column>
+                 <column>
+                  <property name="text">
+                   <string>Priority</string>
+                  </property>
+                 </column>
+                 <column>
+                  <property name="text">
+                   <string>Recursive</string>
+                  </property>
+                 </column>
+                 <column>
+                  <property name="text">
+                   <string>Target Box</string>
+                  </property>
+                 </column>
                 </widget>
                </item>
                <item row="5" column="1">
