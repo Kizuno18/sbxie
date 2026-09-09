@@ -2076,4 +2076,3 @@ static void CALLBACK Gui_WinEventHookProc(
     if (! bFilter)
         origProc(hWinEventHook, event, hwnd, idObject, idChild, idEventThread, dwmsEventTime);
 }
-

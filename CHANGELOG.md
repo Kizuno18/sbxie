@@ -7,6 +7,9 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 ## [1.18.4 / 5.73.4] - 2026-09-06
 
 ### Added
+- added optional `AlwaysActive=y` window activation handling, preserving normal focus transfers within the same process [#4140](https://github.com/sandboxie-plus/Sandboxie/pull/4140)
+- added optional automatic snapshot capture on sandbox close and a snapshot-before-delete recovery action; snapshot errors abort automatic deletion [#5493](https://github.com/sandboxie-plus/Sandboxie/pull/5493)
+- added optional privacy-mode profile discovery templates for Firefox, Waterfox, Pale Moon, SeaMonkey, and LibreWolf [#5313](https://github.com/sandboxie-plus/Sandboxie/pull/5313)
 - added a native proxy profile/tunnel review prototype in SandMan; tunnel activation remains disabled pending Windows routing and failure qualification
 - added per-sandbox identity profiles to SandMan (Advanced > Privacy): persistent, versioned volume serial profiles that are bound to a sandbox and written as `DiskSerialNumber`/`HideDiskSerialNumber`; covers the existing `GetVolumeInformationByHandleW` hook only. Saves take a per-profile lock and check the stored revision, so a stale editor cannot overwrite newer serials or recreate a removed profile
 - added a redacted stack-trace export in the SandMan trace view: the local stack details stay in the dialog, `Copy` and `Save` produce a share view built from an allow-list (opaque per-report module ids, no paths, no absolute addresses/offsets, no module or symbol names) and the atomic writer never falls back to a direct write
@@ -14,6 +17,8 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 - added the `Show Future Settings` editor setting (enabled by default) to include future-version settings in SandMan INI completion candidates
 
 ### Fixed
+- fixed blocked `ConnectEx` calls returning a truthy failure value instead of `FALSE` [#5262](https://github.com/sandboxie-plus/Sandboxie/pull/5262)
+- fixed add-on download failures being reported as success and add-on list refresh connections [#5596](https://github.com/sandboxie-plus/Sandboxie/pull/5596)
 - preserved unavailable adapter bindings when saving unrelated network options
 - propagated socket bind errors before proceeding with a bound connection
 - fixed ignored INI list and boolean write errors and SandMan discarding pending options or raw INI edits after a reported save failure, including sandbox Apply/OK writing stale structured settings right after cancelling a partial raw save
@@ -23,6 +28,8 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 - fixed archive path cleaning
 
 ### Changed
+- improved Simplified Chinese translations, preserved live window-title keys, and added checks for deprecated terminology [#5547](https://github.com/sandboxie-plus/Sandboxie/pull/5547), [#5589](https://github.com/sandboxie-plus/Sandboxie/pull/5589), [#5595](https://github.com/sandboxie-plus/Sandboxie/pull/5595)
+- updated bundled 7-Zip downloads to official 26.00 packages with SHA256 verification and required DLL output checks [#5313](https://github.com/sandboxie-plus/Sandboxie/pull/5313)
 - changed `UseShellNotifyIconProxy` to remain enabled by default for `OpenWinClass=*` while allowing explicit use for other sandboxed processes; non-`OpenWinClass=*` cases default to direct routing
 - improved SandMan INI editor auto-completion with synchronized per-editor metadata, context-aware semantic ranking, fuzzy matching, and deferred refreshes during rapid typing or deletion
 - improved INI completion-popup tooltips jumping between sides or overlapping candidates when displaying large setting descriptions
