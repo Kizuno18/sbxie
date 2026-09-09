@@ -263,8 +263,13 @@ void CSharedAccessWidget::SaveAccessList()
 	QMap<QString, QList<QString>> AccessMap = GetAccessList();
 
 	foreach(const QString & Key, Keys) {
-		m_pIni->UpdateTextList(Key, AccessMap[Key], m_bTemplate);
-		m_pIni->UpdateTextList(Key + "Disabled", AccessMap[Key + "Disabled"], m_bTemplate);
+		SB_STATUS Status = m_pIni->UpdateTextList(Key, AccessMap[Key], m_bTemplate);
+		if (!Status)
+			throw Status;
+
+		Status = m_pIni->UpdateTextList(Key + "Disabled", AccessMap[Key + "Disabled"], m_bTemplate);
+		if (!Status)
+			throw Status;
 	}
 }
 
