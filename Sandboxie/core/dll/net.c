@@ -1387,7 +1387,7 @@ _FX int WSA_connect(
 	}
 
     if (WSA_BlockPrivateNet && WSA_IsPrivateNet(name, namelen)) {
-        SetLastError(WSAECONNREFUSED);
+        __sys_WSASetLastError(WSAECONNREFUSED);
         return SOCKET_ERROR;
     }
 
@@ -1473,7 +1473,7 @@ _FX int WSA_WSAConnect(
         return SOCKET_ERROR;
 
     if (WSA_BlockPrivateNet && WSA_IsPrivateNet(name, namelen)) {
-        SetLastError(WSAECONNREFUSED);
+        __sys_WSASetLastError(WSAECONNREFUSED);
         return SOCKET_ERROR;
     }
 
@@ -1556,11 +1556,11 @@ _FX int WSA_ConnectEx(
     LPOVERLAPPED lpOverlapped)
 {
     if (WSA_IsBlockedTraffic(name, namelen, IPPROTO_TCP))
-        return SOCKET_ERROR;
+        return FALSE;
 
     if (WSA_BlockPrivateNet && WSA_IsPrivateNet(name, namelen)) {
-        SetLastError(WSAECONNREFUSED);
-        return SOCKET_ERROR;
+        __sys_WSASetLastError(WSAECONNREFUSED);
+        return FALSE;
     }
 
     // If BindIP is configured, try to bind the socket to the configured adapter
@@ -1573,13 +1573,13 @@ _FX int WSA_ConnectEx(
         // If adapter is unavailable and StrictBindIP is enabled, fail immediately
         if (!bind_valid && strict) {
             __sys_WSASetLastError(WSAEADDRNOTAVAIL);
-            return SOCKET_ERROR;
+            return FALSE;
         }
         
         // If adapter is available, bind to it (regardless of strict mode)
         if (bind_valid) {
             if (WSA_bind_ip(s) != 0) {
-                return SOCKET_ERROR;
+                return FALSE;
             }
         }
         // If adapter unavailable but StrictBindIP=n, continue without binding
@@ -1741,7 +1741,7 @@ _FX int WSA_sendto(
         return SOCKET_ERROR;
 
     if (WSA_BlockPrivateNet && WSA_IsPrivateNet(to, tolen)) {
-        SetLastError(WSAECONNREFUSED);
+        __sys_WSASetLastError(WSAECONNREFUSED);
         return SOCKET_ERROR;
     }
 
@@ -1787,7 +1787,7 @@ _FX int WSA_WSASendTo(
         return SOCKET_ERROR;
 
     if (WSA_BlockPrivateNet && WSA_IsPrivateNet(lpTo, iTolen)) {
-        SetLastError(WSAECONNREFUSED);
+        __sys_WSASetLastError(WSAECONNREFUSED);
         return SOCKET_ERROR;
     }
 
@@ -1857,8 +1857,10 @@ _FX int WSA_recvfrom(
     if (WSA_IsBlockedTraffic(from, *fromlen, IPPROTO_UDP))
         return SOCKET_ERROR;
 
-    if (WSA_BlockPrivateNet && WSA_IsPrivateNet(from, *fromlen))
+    if (ret != SOCKET_ERROR && WSA_BlockPrivateNet && WSA_IsPrivateNet(from, *fromlen)) {
+        __sys_WSASetLastError(WSAECONNREFUSED);
         return SOCKET_ERROR;
+    }
 
     return ret;
 }
@@ -1911,8 +1913,11 @@ _FX int WSA_WSARecvFrom(
     if (WSA_IsBlockedTraffic(lpFrom, *lpFromlen, IPPROTO_UDP))
         return SOCKET_ERROR;
 
-    if (WSA_BlockPrivateNet && WSA_IsPrivateNet(lpFrom, *lpFromlen))
+    if (!lpOverlapped && ret != SOCKET_ERROR && WSA_BlockPrivateNet &&
+            WSA_IsPrivateNet(lpFrom, *lpFromlen)) {
+        __sys_WSASetLastError(WSAECONNREFUSED);
         return SOCKET_ERROR;
+    }
 
     return ret;
 }
