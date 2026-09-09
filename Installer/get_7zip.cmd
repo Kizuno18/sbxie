@@ -1,6 +1,5 @@
 @echo off
-setlocal
-setlocal enabledelayedexpansion
+setlocal EnableExtensions EnableDelayedExpansion
 
 set "RELEASE_VERSION=26.00"
 set "PACKAGE_VERSION=2600"
@@ -11,6 +10,8 @@ set "SEVENZIP_HASH_WIN32=d605eb609aa67796dca7cfe26d7e28792090bb8048302d6e05ede16
 set "SEVENZIP_HASH_X64=6fe18d5b3080e39678cabfa6cef12cfb25086377389b803a36a3c43236a8a82c"
 
 mkdir "%SEVENZIP_DIR%" 2>nul
+if exist "%SEVENZIP_DIR%\7-Zip-Win32" rmdir /s /q "%SEVENZIP_DIR%\7-Zip-Win32"
+if exist "%SEVENZIP_DIR%\7-Zip-x64" rmdir /s /q "%SEVENZIP_DIR%\7-Zip-x64"
 mkdir "%SEVENZIP_DIR%\7-Zip-Win32" 2>nul
 mkdir "%SEVENZIP_DIR%\7-Zip-x64" 2>nul
 
@@ -26,11 +27,19 @@ if errorlevel 1 exit /b %errorlevel%
 
 "C:\Program Files\7-Zip\7z.exe" x -y -aoa -bd -o"%SEVENZIP_DIR%\7-Zip-Win32" "%SEVENZIP_WIN32%"
 if errorlevel 1 exit /b %errorlevel%
+if not exist "%SEVENZIP_DIR%\7-Zip-Win32\7z.dll" (
+	echo Win32 extraction did not produce 7z.dll.
+	exit /b 1
+)
 
 "C:\Program Files\7-Zip\7z.exe" x -y -aoa -bd -o"%SEVENZIP_DIR%\7-Zip-x64" "%SEVENZIP_X64%"
 if errorlevel 1 exit /b %errorlevel%
+if not exist "%SEVENZIP_DIR%\7-Zip-x64\7z.dll" (
+	echo x64 extraction did not produce 7z.dll.
+	exit /b 1
+)
 
-endlocal & endlocal
+endlocal
 exit /b 0
 
 :verify_hash
@@ -38,7 +47,7 @@ set "FILE_PATH=%~1"
 set "EXPECTED_HASH=%~2"
 set "ACTUAL_HASH="
 
-for /f %%i in ('powershell -NoProfile -Command "$hash = Get-FileHash -Algorithm SHA256 -LiteralPath \"%FILE_PATH%\"; $hash.Hash.ToLowerInvariant()"') do (
+for /f %%i in ('powershell -NoProfile -Command "$stream = [IO.File]::OpenRead(\"%FILE_PATH%\"); try { $sha = [Security.Cryptography.SHA256]::Create(); [BitConverter]::ToString($sha.ComputeHash($stream)).Replace(\"-\", \"\").ToLowerInvariant() } finally { $stream.Dispose() }"') do (
 	set "ACTUAL_HASH=%%i"
 )
 
