@@ -2799,7 +2799,7 @@ void CSandMan::OnBoxClosed(const CSandBoxPtr& pBox)
 		QString SnapName = tr("Auto-Snap %1").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH-mm-ss"));
 		SB_PROGRESS Status = pBox->TakeSnapshot(SnapName);
 		if (Status.IsError()) {
-			CheckResults(QList<SB_STATUS>() << Status);
+			CheckResults(QList<SB_STATUS>() << Status, this);
 			return false;
 		}
 		if (theConf->GetBool("Options/AutoBoxOpsNotify", false))
