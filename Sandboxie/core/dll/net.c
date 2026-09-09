@@ -1507,7 +1507,7 @@ _FX int WSA_ConnectEx(
     LPOVERLAPPED lpOverlapped)
 {
     if (WSA_IsBlockedTraffic(name, namelen, IPPROTO_TCP))
-        return SOCKET_ERROR;
+        return FALSE;
 
     // If BindIP is configured, try to bind the socket to the configured adapter
     // When StrictBindIP=n, we allow connections even if adapter is unavailable
@@ -1519,13 +1519,13 @@ _FX int WSA_ConnectEx(
         // If adapter is unavailable and StrictBindIP is enabled, fail immediately
         if (!bind_valid && strict) {
             __sys_WSASetLastError(WSAEADDRNOTAVAIL);
-            return SOCKET_ERROR;
+            return FALSE;
         }
         
         // If adapter is available, bind to it (regardless of strict mode)
         if (bind_valid) {
             if (WSA_bind_ip(s) != 0) {
-                return SOCKET_ERROR;
+                return FALSE;
             }
         }
         // If adapter unavailable but StrictBindIP=n, continue without binding
