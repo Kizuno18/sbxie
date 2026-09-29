@@ -1,0 +1,28 @@
+name: Private network regression
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'Sandboxie/core/dll/net.c'
+      - 'Sandboxie/core/drv/wfp.c'
+      - 'SandboxieTools/Tests/private-network/**'
+      - '.github/workflows/private-network.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'Sandboxie/core/dll/net.c'
+      - 'Sandboxie/core/drv/wfp.c'
+      - 'SandboxieTools/Tests/private-network/**'
+      - '.github/workflows/private-network.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  classifiers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 SandboxieTools/Tests/private-network/run_tests.py
