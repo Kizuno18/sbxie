@@ -7,6 +7,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 ## [1.18.4 / 5.73.4] - 2026-09-06
 
 ### Added
+- added a shared file-access editor to sandbox options and the creation wizard, preserving group identifiers and reporting save failures [#5482](https://github.com/sandboxie-plus/Sandboxie/pull/5482)
 - added opt-in per-process `InjectCmdLine` arguments with bounded Unicode allocation and cleanup on ANSI conversion failure [#5489](https://github.com/sandboxie-plus/Sandboxie/pull/5489)
 - added portable sandbox creation with a separate INI file and rollback on import failure; existing configurations are never overwritten [#5488](https://github.com/sandboxie-plus/Sandboxie/pull/5488)
 - added opt-in `BlockPrivateNet=y` filtering for private and link-local IPv4/IPv6 destinations in WFP and synchronous Winsock fallback paths [#5262](https://github.com/sandboxie-plus/Sandboxie/pull/5262)

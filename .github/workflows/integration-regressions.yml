@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [master, 'integrate/**']
     paths:
+      - 'SandboxiePlus/SandMan/Windows/SharedAccessWidget.*'
+      - 'SandboxiePlus/SandMan/Windows/OptionsAccess.cpp'
+      - 'SandboxiePlus/tests/shared-access/**'
       - 'Sandboxie/core/dll/kernel.c'
       - 'Sandboxie/core/dll/proc.c'
       - 'SandboxieTools/Tests/command-line/**'
@@ -15,6 +18,9 @@ on:
   push:
     branches: [master]
     paths:
+      - 'SandboxiePlus/SandMan/Windows/SharedAccessWidget.*'
+      - 'SandboxiePlus/SandMan/Windows/OptionsAccess.cpp'
+      - 'SandboxiePlus/tests/shared-access/**'
       - 'Sandboxie/core/dll/kernel.c'
       - 'Sandboxie/core/dll/proc.c'
       - 'SandboxieTools/Tests/command-line/**'
@@ -43,3 +49,8 @@ jobs:
           cmake -S SandboxiePlus/tests/portable-box -B build/portable-box -DCMAKE_BUILD_TYPE=Release
           cmake --build build/portable-box --parallel 2
           ctest --test-dir build/portable-box --output-on-failure
+      - name: Shared file-access editor
+        run: |
+          cmake -S SandboxiePlus/tests/shared-access -B build/shared-access -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/shared-access --parallel 2
+          ctest --test-dir build/shared-access --output-on-failure
