@@ -2,11 +2,13 @@
 
 #include "NewBoxWizard.h"
 #include "PortableBoxIni.h"
+#include "../Windows/SharedAccessWidget.h"
 #include "../MiscHelpers/Common/Common.h"
 #include "../Windows/SettingsWindow.h"
 #include "../SandMan.h"
 #include "Helpers/WinAdmin.h"
 #include <QButtonGroup>
+#include <QVBoxLayout>
 #include "../QSbieAPI/SbieUtils.h"
 #include "../Views/SbieView.h"
 #include "../MiscHelpers/Common/CheckableMessageBox.h"
@@ -58,6 +60,7 @@ CNewBoxWizard::CNewBoxWizard(bool bAlowTemp, QWidget *parent)
 {
     setPage(Page_Type, new CBoxTypePage(bAlowTemp));
     setPage(Page_Files, new CFilesPage);
+    setPage(Page_AccessControl, new CAccessControlPage);
     setPage(Page_Isolation, new CIsolationPage);
     setPage(Page_Advanced, new CAdvancedPage);
     setPage(Page_Summary, new CSummaryPage);
@@ -397,6 +400,17 @@ SB_STATUS CNewBoxWizard::TryToCreateBox()
 
             if (!Password.isEmpty())
                 pBox->ImBoxCreate(ImageSize / 1024, Password);
+
+            {
+                CAccessControlPage* pAccessPage = (CAccessControlPage*)page(Page_AccessControl);
+                if (pAccessPage) {
+                    for (const auto& entry : pAccessPage->GetFileAccessEntries()) {
+                        Status = pBox->AppendText(entry.second, entry.first);
+                        if (Status.IsError())
+                            return Status;
+                    }
+                }
+            }
 
             if (field("boxVersion").toInt() == 1) {
                 if (theConf->GetBool("Options/WarnDeleteV2", true)) {
@@ -812,6 +826,12 @@ CFilesPage::CFilesPage(QWidget *parent)
     layout->addWidget(pAutoRecover, row++, 1, 1, 3);
     registerField("autoRecover", pAutoRecover);
 
+    m_pSetAccessControl = new QCheckBox(tr("Configure file access control on the next page"));
+    m_pSetAccessControl->setToolTip(tr("When checked, the wizard will show an additional page on which file access control entries "
+        "can be added to restrict or define the access of sandboxed processes to files and folders."));
+    m_pSetAccessControl->setChecked(true);
+    layout->addWidget(m_pSetAccessControl, row++, 1, 1, 3);
+
 
     setLayout(layout);
 
@@ -825,6 +845,8 @@ CFilesPage::CFilesPage(QWidget *parent)
 
 int CFilesPage::nextId() const
 {
+    if (m_pSetAccessControl->isChecked())
+        return CNewBoxWizard::Page_AccessControl;
     return CNewBoxWizard::Page_Isolation;
 }
 
@@ -875,6 +897,56 @@ bool CFilesPage::validatePage()
         wizard()->setField("boxLocation", Location);
     }
     return true;
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// CAccessControlPage
+//
+
+CAccessControlPage::CAccessControlPage(QWidget *parent)
+    : QWizardPage(parent)
+{
+    setTitle(tr("File access control"));
+    setSubTitle(tr("On this page custom file access control entries can be configured. "
+        "These entries define how sandboxed processes can access the specified files and folders, "
+        "e.g. to block access to sensitive data or to allow write access to files located in the host system."));
+
+    QVBoxLayout* pLayout = new QVBoxLayout;
+
+    m_pFileAccess = new CSharedFileWidget(this);
+    m_pFileAccess->SetShowTemplates(false);
+    m_pFileAccess->SetTemplatesEnabled(false);
+    pLayout->addWidget(m_pFileAccess);
+
+    setLayout(pLayout);
+}
+
+int CAccessControlPage::nextId() const
+{
+    return CNewBoxWizard::Page_Isolation;
+}
+
+void CAccessControlPage::initializePage()
+{
+}
+
+bool CAccessControlPage::validatePage()
+{
+    m_pFileAccess->CloseAccessEdit(true);
+    return true;
+}
+
+QList<QPair<QString, QString>> CAccessControlPage::GetFileAccessEntries() const
+{
+    QList<QPair<QString, QString>> Entries;
+    QMap<QString, QList<QString>> AccessMap = m_pFileAccess->GetAccessList();
+    for (QMap<QString, QList<QString>>::const_iterator I = AccessMap.constBegin(); I != AccessMap.constEnd(); ++I)
+    {
+        foreach(const QString& Value, I.value())
+            Entries.append(qMakePair(Value, I.key()));
+    }
+    return Entries;
 }
 
 
@@ -1239,6 +1311,17 @@ void CSummaryPage::initializePage()
     if(field("boxToken").toBool())
         m_pSummary->append(tr("\nProcesses in this box will be running with a custom process token indicating the sandbox they belong to."));
 
+    {
+        CAccessControlPage* pAccessPage = (CAccessControlPage*)((CNewBoxWizard*)wizard())->page(CNewBoxWizard::Page_AccessControl);
+        if (pAccessPage) {
+            auto entries = pAccessPage->GetFileAccessEntries();
+            if (!entries.isEmpty()) {
+                m_pSummary->append(tr("\nFile Access Control:"));
+                for (const auto& entry : entries)
+                    m_pSummary->append(tr("  [%1] %2").arg(entry.second, entry.first));
+            }
+        }
+    }
 
     m_pSetDefault->setVisible(((CNewBoxWizard*)wizard())->m_bAdvanced);
 }
