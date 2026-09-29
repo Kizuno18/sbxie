@@ -1,0 +1,37 @@
+name: Integration regressions
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master, 'integrate/**']
+    paths:
+      - 'SandboxiePlus/SandMan/Wizards/PortableBoxIni.h'
+      - 'SandboxiePlus/SandMan/Wizards/NewBoxWizard.cpp'
+      - 'SandboxiePlus/tests/portable-box/**'
+      - '.github/workflows/integration-regressions.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'SandboxiePlus/SandMan/Wizards/PortableBoxIni.h'
+      - 'SandboxiePlus/SandMan/Wizards/NewBoxWizard.cpp'
+      - 'SandboxiePlus/tests/portable-box/**'
+      - '.github/workflows/integration-regressions.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y qt6-base-dev
+      - name: Portable INI writer
+        run: |
+          cmake -S SandboxiePlus/tests/portable-box -B build/portable-box -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/portable-box --parallel 2
+          ctest --test-dir build/portable-box --output-on-failure
