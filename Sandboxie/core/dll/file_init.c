@@ -217,6 +217,8 @@ _FX BOOLEAN File_Init(void)
 
     File_InitFileMigration();
 
+    File_InitJunctions();
+
     //
     // intercept NTDLL entry points
     //
