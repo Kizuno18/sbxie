@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [master, 'integrate/**']
     paths:
+      - 'Sandboxie/core/dll/kernel.c'
+      - 'Sandboxie/core/dll/proc.c'
+      - 'SandboxieTools/Tests/command-line/**'
       - 'SandboxiePlus/SandMan/Wizards/PortableBoxIni.h'
       - 'SandboxiePlus/SandMan/Wizards/NewBoxWizard.cpp'
       - 'SandboxiePlus/tests/portable-box/**'
@@ -12,6 +15,9 @@ on:
   push:
     branches: [master]
     paths:
+      - 'Sandboxie/core/dll/kernel.c'
+      - 'Sandboxie/core/dll/proc.c'
+      - 'SandboxieTools/Tests/command-line/**'
       - 'SandboxiePlus/SandMan/Wizards/PortableBoxIni.h'
       - 'SandboxiePlus/SandMan/Wizards/NewBoxWizard.cpp'
       - 'SandboxiePlus/tests/portable-box/**'
@@ -26,6 +32,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Command-line injection
+        run: python3 SandboxieTools/Tests/command-line/run_tests.py
       - name: Install Qt
         run: |
           sudo apt-get update
