@@ -37,7 +37,8 @@
 #include "core/drv/api_defs.h"
 #include <sddl.h>
 #include "sbieiniserver.h"
-#include <string>
+#include "common/program_control_rule.h"
+#include "common/program_control_runtime.h"
 
 #define SECONDS(n64)            (((LONGLONG)n64) * 10000000L)
 #define MINUTES(n64)            (SECONDS(n64) * 60)
@@ -51,6 +52,1363 @@ NTSYSCALLAPI NTSTATUS NTAPI NtGetNextThread(HANDLE ProcessHandle, HANDLE ThreadH
 
 NTSYSCALLAPI NTSTATUS NTAPI NtSuspendProcess(_In_ HANDLE ProcessHandle);
 NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(_In_ HANDLE ProcessHandle);
+}
+
+static BOOLEAN ProcessServer_UseRuleExtensions(const WCHAR* boxname)
+{
+    return SbieApi_QueryConfBool(boxname, L"UseForceBreakoutRuleExtensions", FALSE) ? TRUE : FALSE;
+}
+
+static BOOLEAN ProcessServer_AreBreakoutRulesEnabled(const WCHAR* boxname)
+{
+    return SbieApi_QueryConfBool(boxname, L"DisableBreakoutRules", FALSE) ? FALSE : TRUE;
+}
+
+static BOOLEAN ProcessServer_AreForceRulesEnabled(const WCHAR* boxname)
+{
+    return SbieApi_QueryConfBool(boxname, L"DisableForceRules", FALSE) ? FALSE : TRUE;
+}
+
+static BOOLEAN ProcessServer_UseRuleExtensionsForCandidate(
+    BOOLEAN source_use_rule_extensions,
+    const WCHAR* boxname)
+{
+    if (!source_use_rule_extensions)
+        return FALSE;
+
+    return ProcessServer_UseRuleExtensions(boxname);
+}
+
+static int ProcessServer_BreakoutMatchImage(const WCHAR* pattern, const WCHAR* imageName, void* context)
+{
+    return SbieDll_MatchImage(pattern, imageName, NULL) ? 1 : 0;
+}
+
+static void ProcessServer_AdjustBreakoutFolderRule(WCHAR* value, void* context)
+{
+    ProgramControl_TrimTrailingBackslashes(value);
+    if (*value != L'*')
+        SbieDll_TranslateNtToDosPath(value);
+}
+
+static void ProcessServer_AdjustBreakoutDocumentRule(WCHAR* value, void* context)
+{
+    (void)context;
+    if (value && *value != L'*')
+        SbieDll_TranslateNtToDosPath(value);
+}
+
+static void ProcessServer_RuntimeCopyMatch(
+    const SBIE_RT_MATCH* match,
+    BOOLEAN* outHasTarget,
+    WCHAR* outTarget,
+    size_t outTargetCch,
+    BOOLEAN* outHasPriority,
+    LONG* outPriority)
+{
+    const WCHAR* targetBox = NULL;
+    if (outHasTarget)
+        *outHasTarget = FALSE;
+    if (outTarget && outTargetCch)
+        outTarget[0] = L'\0';
+    if (outHasPriority)
+        *outHasPriority = FALSE;
+    if (outPriority)
+        *outPriority = -1;
+
+    if (!match || !match->matched)
+        return;
+
+    if (ProgramControl_RuntimeGetApplicableTargetBox(match, &targetBox)) {
+        if (outHasTarget)
+            *outHasTarget = TRUE;
+        if (outTarget && outTargetCch)
+            wcscpy_s(outTarget, outTargetCch, targetBox);
+    }
+
+    if (outHasPriority)
+        *outHasPriority = match->has_priority ? TRUE : FALSE;
+    if (outPriority)
+        *outPriority = match->has_priority ? (LONG)match->priority : -1;
+}
+
+static BOOLEAN ProcessServer_RuntimeCompileSettingAdjusted(
+    SBIE_RT_RULESET* ruleset,
+    const WCHAR* setting,
+    const WCHAR* value,
+    int useRuleExtensions,
+    BreakoutAdjustRuleFn adjustRule,
+    void* adjustContext)
+{
+    WCHAR parseBuf[CONF_LINE_LEN];
+    WCHAR compileBuf[CONF_LINE_LEN];
+    SBIE_PROGRAM_RULE_KIND ruleKind = SBIE_RULE_KIND_NONE;
+    SBIE_NORMALIZED_RULE rule;
+    WCHAR* parseValue = parseBuf;
+    size_t baseOffset;
+    size_t suffixOffset;
+    WCHAR* compileBase;
+    WCHAR* compileSep;
+
+    if (!ruleset || !setting || !value || !*value)
+        return FALSE;
+
+    wcscpy_s(parseBuf, ARRAYSIZE(parseBuf), value);
+    wcscpy_s(compileBuf, ARRAYSIZE(compileBuf), value);
+
+    if (!ProgramControl_GetRuleKindForSetting(setting, &ruleKind))
+        return FALSE;
+
+    if (ruleKind != SBIE_RULE_KIND_PROCESS) {
+        parseValue = ProgramControl_ParseImageScopeInPlace(parseBuf, NULL, NULL, NULL, NULL);
+        if (!parseValue)
+            return FALSE;
+    }
+
+    if (!ProgramControl_ParseRuleExtensionsInPlace(parseValue, &rule, useRuleExtensions))
+        return FALSE;
+
+    if (adjustRule) {
+        baseOffset = (size_t)(rule.base_rule - parseBuf);
+        compileBase = compileBuf + baseOffset;
+        compileSep = wcschr(compileBase, L'|');
+        if (compileSep) {
+            if (wcscpy_s(parseBuf, ARRAYSIZE(parseBuf), compileSep) != 0)
+                return FALSE;
+            *compileSep = L'\0';
+        }
+
+        adjustRule(compileBase, adjustContext);
+
+        if (compileSep) {
+            compileSep = compileBase + wcslen(compileBase);
+            suffixOffset = (size_t)(compileSep - compileBuf);
+            if (suffixOffset >= ARRAYSIZE(compileBuf) ||
+                wcscpy_s(compileSep, ARRAYSIZE(compileBuf) - suffixOffset, parseBuf) != 0)
+                return FALSE;
+        }
+    }
+
+    return ProgramControl_RuntimeCompileSetting(
+        ruleset, setting, compileBuf, useRuleExtensions) ? TRUE : FALSE;
+}
+
+static BOOLEAN ProcessServer_LoadRuntimeRulesetForSetting(
+    const WCHAR* boxname,
+    const WCHAR* setting,
+    int useRuleExtensions,
+    BreakoutAdjustRuleFn adjustRule,
+    void* adjustContext,
+    SBIE_RT_RULESET* ruleset)
+{
+    WCHAR buf[CONF_LINE_LEN];
+    ULONG index = 0;
+
+    if (!setting || !*setting || !ruleset)
+        return FALSE;
+
+    while (1) {
+        NTSTATUS status;
+
+        if (_wcsicmp(setting, L"ForceFolder") == 0 ||
+            _wcsicmp(setting, L"BreakoutFolder") == 0 ||
+            _wcsicmp(setting, L"BreakoutDocument") == 0)
+            status = SbieApi_QueryConf(boxname, setting, index, buf, sizeof(buf) - 16 * sizeof(WCHAR));
+        else
+            status = SbieApi_QueryConfAsIs(boxname, setting, index, buf, sizeof(buf) - sizeof(WCHAR));
+
+        ++index;
+        if (!NT_SUCCESS(status)) {
+            if (status == STATUS_BUFFER_TOO_SMALL)
+                continue;
+            break;
+        }
+
+        if (!ProcessServer_RuntimeCompileSettingAdjusted(
+                ruleset,
+                setting,
+                buf,
+                useRuleExtensions,
+                adjustRule,
+                adjustContext)) {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static bool ProcessServer_GetBreakoutProcessMatch(
+    const WCHAR* boxname, const WCHAR* imageName, const WCHAR* appPath, ULONG appPathLen,
+    WCHAR* outTarget, size_t outTargetCch,
+    BOOLEAN* outHasTarget,
+    BOOLEAN* outHasPriority, LONG* outPriority)
+{
+    const BOOLEAN use_rule_extensions = ProcessServer_UseRuleExtensions(boxname);
+    POOL* pool;
+    SBIE_RT_RULESET ruleset;
+    SBIE_RT_MATCH force_process_match;
+    SBIE_RT_MATCH force_children_match;
+    SBIE_RT_MATCH breakout_process_match;
+
+    ProcessServer_RuntimeCopyMatch(NULL, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+
+    if (!boxname || !*boxname || !imageName || !*imageName || !appPath || !appPathLen)
+        return false;
+
+    pool = Pool_Create();
+    if (!pool)
+        return false;
+
+    ProgramControl_RuntimeInitRuleset(&ruleset, pool);
+    ProgramControl_RuntimeInitMatch(&force_process_match);
+    ProgramControl_RuntimeInitMatch(&force_children_match);
+    ProgramControl_RuntimeInitMatch(&breakout_process_match);
+
+    if (!ProcessServer_LoadRuntimeRulesetForSetting(
+            boxname,
+            L"BreakoutProcess",
+            use_rule_extensions ? 1 : 0,
+            NULL,
+            NULL,
+            &ruleset) ||
+        !ProgramControl_RuntimeMatchProcess(
+            &ruleset,
+            imageName,
+            appPath,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            &force_process_match,
+            &force_children_match,
+            &breakout_process_match)) {
+        ProgramControl_RuntimeFreeRuleset(&ruleset);
+        Pool_Delete(pool);
+        return false;
+    }
+
+    ProcessServer_RuntimeCopyMatch(&breakout_process_match, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+    ProgramControl_RuntimeFreeRuleset(&ruleset);
+    Pool_Delete(pool);
+
+    return true;
+}
+
+static bool ProcessServer_GetBreakoutFolderTarget(
+    const WCHAR* boxname, const WCHAR* imageName, const WCHAR* appPath, ULONG appDirLen,
+    WCHAR* outTarget, size_t outTargetCch,
+    BOOLEAN* outHasPriority, LONG* outPriority)
+{
+    const BOOLEAN use_rule_extensions = ProcessServer_UseRuleExtensions(boxname);
+    POOL* pool;
+    SBIE_RT_RULESET ruleset;
+    SBIE_RT_MATCH force_folder_match;
+    SBIE_RT_MATCH breakout_folder_match;
+    BOOLEAN hasTarget = FALSE;
+
+    if (outTarget && outTargetCch)
+        outTarget[0] = L'\0';
+    if (outHasPriority)
+        *outHasPriority = FALSE;
+    if (outPriority)
+        *outPriority = -1;
+
+    if (!boxname || !*boxname || !imageName || !*imageName || !appPath || !appDirLen)
+        return false;
+
+    pool = Pool_Create();
+    if (!pool)
+        return false;
+
+    ProgramControl_RuntimeInitRuleset(&ruleset, pool);
+    ProgramControl_RuntimeInitMatch(&force_folder_match);
+    ProgramControl_RuntimeInitMatch(&breakout_folder_match);
+
+    if (!ProcessServer_LoadRuntimeRulesetForSetting(
+            boxname,
+            L"BreakoutFolder",
+            use_rule_extensions ? 1 : 0,
+            ProcessServer_AdjustBreakoutFolderRule,
+            NULL,
+            &ruleset) ||
+        !ProgramControl_RuntimeMatchFolder(
+            &ruleset,
+            imageName,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            appPath,
+            appDirLen,
+            &force_folder_match,
+            &breakout_folder_match)) {
+        ProgramControl_RuntimeFreeRuleset(&ruleset);
+        Pool_Delete(pool);
+        return false;
+    }
+
+    ProcessServer_RuntimeCopyMatch(&breakout_folder_match, &hasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+    ProgramControl_RuntimeFreeRuleset(&ruleset);
+    Pool_Delete(pool);
+    return true;
+}
+
+static bool ProcessServer_GetBreakoutDocumentMatch(
+    const WCHAR* boxname,
+    const WCHAR* imageName,
+    const WCHAR* docPath,
+    ULONG docPathLen,
+    BOOLEAN* outHasPriority,
+    LONG* outPriority,
+    BOOLEAN* outHasTarget,
+    WCHAR* outTarget,
+    size_t outTargetCch)
+{
+    const BOOLEAN use_rule_extensions = ProcessServer_UseRuleExtensions(boxname);
+    POOL* pool;
+    SBIE_RT_RULESET ruleset;
+    SBIE_RT_MATCH breakout_document_match;
+
+    ProcessServer_RuntimeCopyMatch(NULL, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+
+    if (!boxname || !*boxname || !imageName || !*imageName || !docPath || !docPathLen)
+        return false;
+
+    pool = Pool_Create();
+    if (!pool)
+        return false;
+
+    ProgramControl_RuntimeInitRuleset(&ruleset, pool);
+    ProgramControl_RuntimeInitMatch(&breakout_document_match);
+
+    if (!ProcessServer_LoadRuntimeRulesetForSetting(
+            boxname,
+            L"BreakoutDocument",
+            use_rule_extensions ? 1 : 0,
+            ProcessServer_AdjustBreakoutDocumentRule,
+            NULL,
+            &ruleset) ||
+        !ProgramControl_RuntimeMatchDocument(
+            &ruleset,
+            imageName,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            docPath,
+            docPathLen,
+            &breakout_document_match)) {
+        ProgramControl_RuntimeFreeRuleset(&ruleset);
+        Pool_Delete(pool);
+
+        // Fallback for process-start breakout path: if the document path itself
+        // matches BreakoutDocument, treat it as breakout even when image-scope
+        // parsing did not pick a winner in this service-side context.
+        if (!SbieDll_CheckPatternInList(docPath, docPathLen, boxname, L"BreakoutDocument"))
+            return false;
+
+        if (outHasPriority)
+            *outHasPriority = FALSE;
+        if (outPriority)
+            *outPriority = -1;
+        if (outHasTarget)
+            *outHasTarget = FALSE;
+        return true;
+    }
+
+    ProcessServer_RuntimeCopyMatch(&breakout_document_match, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+    ProgramControl_RuntimeFreeRuleset(&ruleset);
+    Pool_Delete(pool);
+    return true;
+}
+
+static bool ProcessServer_GetForceProcessMatch(
+    const WCHAR* boxName,
+    const WCHAR* imageName,
+    const WCHAR* appPath,
+    ULONG appPathLen,
+    BOOLEAN use_rule_extensions,
+    BOOLEAN *outHasPriority,
+    LONG *outPriority)
+{
+    POOL* pool;
+    SBIE_RT_RULESET ruleset;
+    SBIE_RT_MATCH force_process_match;
+    SBIE_RT_MATCH force_children_match;
+    SBIE_RT_MATCH breakout_process_match;
+
+    if (outHasPriority)
+        *outHasPriority = FALSE;
+    if (outPriority)
+        *outPriority = -1;
+
+    if (!boxName || !*boxName || !imageName || !*imageName || !appPath || !appPathLen)
+        return false;
+
+    pool = Pool_Create();
+    if (!pool)
+        return false;
+
+    ProgramControl_RuntimeInitRuleset(&ruleset, pool);
+    ProgramControl_RuntimeInitMatch(&force_process_match);
+    ProgramControl_RuntimeInitMatch(&force_children_match);
+    ProgramControl_RuntimeInitMatch(&breakout_process_match);
+
+    if (!ProcessServer_LoadRuntimeRulesetForSetting(
+            boxName,
+            L"ForceProcess",
+            use_rule_extensions ? 1 : 0,
+            NULL,
+            NULL,
+            &ruleset) ||
+        !ProgramControl_RuntimeMatchProcess(
+            &ruleset,
+            imageName,
+            appPath,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            &force_process_match,
+            &force_children_match,
+            &breakout_process_match)) {
+        ProgramControl_RuntimeFreeRuleset(&ruleset);
+        Pool_Delete(pool);
+        return false;
+    }
+
+    if (outHasPriority)
+        *outHasPriority = force_process_match.has_priority ? TRUE : FALSE;
+    if (outPriority)
+        *outPriority = force_process_match.has_priority ? (LONG)force_process_match.priority : -1;
+
+    ProgramControl_RuntimeFreeRuleset(&ruleset);
+    Pool_Delete(pool);
+    return force_process_match.matched ? true : false;
+}
+
+static bool ProcessServer_GetForceFolderMatch(
+    const WCHAR* boxName,
+    const WCHAR* imageName,
+    const WCHAR* appPath,
+    ULONG appDirLen,
+    BOOLEAN use_rule_extensions,
+    BOOLEAN* outHasPriority,
+    LONG* outPriority)
+{
+    POOL* pool;
+    SBIE_RT_RULESET ruleset;
+    SBIE_RT_MATCH force_folder_match;
+    SBIE_RT_MATCH breakout_folder_match;
+
+    if (outHasPriority)
+        *outHasPriority = FALSE;
+    if (outPriority)
+        *outPriority = -1;
+
+    if (!boxName || !*boxName || !imageName || !*imageName || !appPath || !appDirLen)
+        return false;
+
+    pool = Pool_Create();
+    if (!pool)
+        return false;
+
+    ProgramControl_RuntimeInitRuleset(&ruleset, pool);
+    ProgramControl_RuntimeInitMatch(&force_folder_match);
+    ProgramControl_RuntimeInitMatch(&breakout_folder_match);
+
+    if (!ProcessServer_LoadRuntimeRulesetForSetting(
+            boxName,
+            L"ForceFolder",
+            use_rule_extensions ? 1 : 0,
+            ProcessServer_AdjustBreakoutFolderRule,
+            NULL,
+            &ruleset) ||
+        !ProgramControl_RuntimeMatchFolder(
+            &ruleset,
+            imageName,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            appPath,
+            appDirLen,
+            &force_folder_match,
+            &breakout_folder_match)) {
+        ProgramControl_RuntimeFreeRuleset(&ruleset);
+        Pool_Delete(pool);
+        return false;
+    }
+
+    if (outHasPriority)
+        *outHasPriority = force_folder_match.has_priority ? TRUE : FALSE;
+    if (outPriority)
+        *outPriority = force_folder_match.has_priority ? (LONG)force_folder_match.priority : -1;
+
+    ProgramControl_RuntimeFreeRuleset(&ruleset);
+    Pool_Delete(pool);
+    return force_folder_match.matched ? true : false;
+}
+
+static void ProcessServer_GetSettingMinPriority(
+    const WCHAR* boxName,
+    const WCHAR* setting,
+    BOOLEAN *outHasPriority,
+    LONG *outPriority)
+{
+    const BOOLEAN use_rule_extensions = ProcessServer_UseRuleExtensions(boxName);
+    ProgramControl_GetSettingMinPriority(
+        boxName, setting, use_rule_extensions ? 1 : 0, outHasPriority, outPriority);
+}
+
+static BOOLEAN ProcessServer_CheckForceChildrenMatch(
+    const WCHAR* boxName,
+    const WCHAR* callerImageName,
+    const WCHAR* callerImagePath,
+    ULONG callerDirLen,
+    BOOLEAN use_rule_extensions,
+    BOOLEAN *outHasPriority,
+    LONG *outPriority)
+{
+    SBIE_RT_RULESET ruleset;
+    SBIE_RT_MATCH force_process_match;
+    SBIE_RT_MATCH force_children_match;
+    SBIE_RT_MATCH breakout_process_match;
+    POOL* pool;
+
+    if (outHasPriority)
+        *outHasPriority = FALSE;
+    if (outPriority)
+        *outPriority = -1;
+
+    if (!boxName || !callerImageName || !*callerImageName || !callerImagePath || !*callerImagePath)
+        return FALSE;
+
+    UNREFERENCED_PARAMETER(callerDirLen);
+
+    pool = Pool_Create();
+    if (!pool)
+        return FALSE;
+
+    ProgramControl_RuntimeInitRuleset(&ruleset, pool);
+    ProgramControl_RuntimeInitMatch(&force_process_match);
+    ProgramControl_RuntimeInitMatch(&force_children_match);
+    ProgramControl_RuntimeInitMatch(&breakout_process_match);
+
+    if (!ProcessServer_LoadRuntimeRulesetForSetting(
+            boxName,
+            L"ForceChildren",
+            use_rule_extensions ? 1 : 0,
+            NULL,
+            NULL,
+            &ruleset) ||
+        !ProgramControl_RuntimeMatchProcess(
+            &ruleset,
+            callerImageName,
+            callerImagePath,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            &force_process_match,
+            &force_children_match,
+            &breakout_process_match)) {
+        ProgramControl_RuntimeFreeRuleset(&ruleset);
+        Pool_Delete(pool);
+        return FALSE;
+    }
+
+    if (outHasPriority)
+        *outHasPriority = force_children_match.has_priority ? TRUE : FALSE;
+    if (outPriority)
+        *outPriority = force_children_match.has_priority ? (LONG)force_children_match.priority : -1;
+
+    ProgramControl_RuntimeFreeRuleset(&ruleset);
+    Pool_Delete(pool);
+    return force_children_match.matched ? TRUE : FALSE;
+}
+
+typedef struct _PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY {
+    WCHAR boxname[BOXNAME_COUNT];
+    LONG status;
+    struct _PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY* next;
+} PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY;
+
+typedef struct _PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY {
+    WCHAR boxname[BOXNAME_COUNT];
+    BOOLEAN has_breakout_rules;
+    POOL* pool;
+    SBIE_RT_RULESET ruleset;
+    struct _PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* next;
+} PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY;
+
+static LONG ProcessServer_IsBoxEnabledCached(
+    const WCHAR* boxname,
+    const WCHAR* sid,
+    ULONG session_id,
+    PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY** cache_head)
+{
+    PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY* entry;
+
+    if (!boxname || !*boxname)
+        return STATUS_INVALID_PARAMETER;
+
+    if (cache_head) {
+        entry = *cache_head;
+        while (entry) {
+            if (_wcsicmp(entry->boxname, boxname) == 0)
+                return entry->status;
+            entry = entry->next;
+        }
+    }
+
+    LONG status = SbieApi_Call(API_IS_BOX_ENABLED, 3, (ULONG_PTR)boxname, (ULONG_PTR)sid, (ULONG_PTR)session_id);
+
+    if (cache_head) {
+        entry = (PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY*)HeapAlloc(GetProcessHeap(), 0, sizeof(PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY));
+        if (entry) {
+            wcscpy(entry->boxname, boxname);
+            entry->status = status;
+            entry->next = *cache_head;
+            *cache_head = entry;
+        }
+    }
+
+    return status;
+}
+
+static void ProcessServer_FreeBoxEnabledCache(PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY* cache_head)
+{
+    while (cache_head) {
+        PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY* next = cache_head->next;
+        HeapFree(GetProcessHeap(), 0, cache_head);
+        cache_head = next;
+    }
+}
+
+static BOOLEAN ProcessServer_HasBreakoutRulesCached(
+    const WCHAR* boxname,
+    PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY** cache_head)
+{
+    PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* entry;
+
+    if (!boxname || !*boxname)
+        return FALSE;
+
+    if (cache_head) {
+        entry = *cache_head;
+        while (entry) {
+            if (_wcsicmp(entry->boxname, boxname) == 0)
+                return entry->has_breakout_rules;
+            entry = entry->next;
+        }
+    }
+
+    BOOLEAN has_breakout_rules = FALSE;
+    BOOLEAN use_rule_extensions = ProcessServer_UseRuleExtensions(boxname);
+    BOOLEAN rules_enabled = ProcessServer_AreBreakoutRulesEnabled(boxname);
+
+    if (cache_head) {
+        entry = (PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY*)HeapAlloc(GetProcessHeap(), 0, sizeof(PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY));
+        if (entry) {
+            ZeroMemory(entry, sizeof(PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY));
+            wcscpy(entry->boxname, boxname);
+            entry->pool = Pool_Create();
+            if (entry->pool)
+                ProgramControl_RuntimeInitRuleset(&entry->ruleset, entry->pool);
+            if (rules_enabled) {
+                if (entry->pool) {
+                    if (!ProcessServer_LoadRuntimeRulesetForSetting(
+                            boxname,
+                            L"BreakoutProcess",
+                            use_rule_extensions ? 1 : 0,
+                            NULL,
+                            NULL,
+                            &entry->ruleset)) {
+                        ProgramControl_RuntimeFreeRuleset(&entry->ruleset);
+                        Pool_Delete(entry->pool);
+                        entry->pool = NULL;
+                    }
+                    if (entry->pool && !ProcessServer_LoadRuntimeRulesetForSetting(
+                            boxname,
+                            L"BreakoutFolder",
+                            use_rule_extensions ? 1 : 0,
+                            ProcessServer_AdjustBreakoutFolderRule,
+                            NULL,
+                            &entry->ruleset)) {
+                        ProgramControl_RuntimeFreeRuleset(&entry->ruleset);
+                        Pool_Delete(entry->pool);
+                        entry->pool = NULL;
+                    }
+                    if (entry->pool && !ProcessServer_LoadRuntimeRulesetForSetting(
+                            boxname,
+                            L"BreakoutDocument",
+                            use_rule_extensions ? 1 : 0,
+                            ProcessServer_AdjustBreakoutDocumentRule,
+                            NULL,
+                            &entry->ruleset)) {
+                        ProgramControl_RuntimeFreeRuleset(&entry->ruleset);
+                        Pool_Delete(entry->pool);
+                        entry->pool = NULL;
+                    }
+                }
+
+                if (entry->pool &&
+                    (entry->ruleset.breakout_process.count ||
+                     entry->ruleset.breakout_folder.count ||
+                     entry->ruleset.breakout_document.count)) {
+                    has_breakout_rules = TRUE;
+                }
+            }
+            entry->has_breakout_rules = has_breakout_rules;
+            entry->next = *cache_head;
+            *cache_head = entry;
+        }
+    }
+
+    return has_breakout_rules;
+}
+
+static void ProcessServer_FreeBreakoutRelevanceCache(PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* cache_head)
+{
+    while (cache_head) {
+        PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* next = cache_head->next;
+        if (cache_head->pool) {
+            ProgramControl_RuntimeFreeRuleset(&cache_head->ruleset);
+            Pool_Delete(cache_head->pool);
+        }
+        HeapFree(GetProcessHeap(), 0, cache_head);
+        cache_head = next;
+    }
+}
+
+static PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* ProcessServer_GetBreakoutRuleCacheEntry(
+    const WCHAR* boxname,
+    PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY** cache_head)
+{
+    PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* entry;
+
+    if (!boxname || !*boxname || !cache_head)
+        return NULL;
+
+    entry = *cache_head;
+    while (entry) {
+        if (_wcsicmp(entry->boxname, boxname) == 0)
+            return entry;
+        entry = entry->next;
+    }
+
+    if (!ProcessServer_HasBreakoutRulesCached(boxname, cache_head))
+        return NULL;
+
+    entry = *cache_head;
+    while (entry) {
+        if (_wcsicmp(entry->boxname, boxname) == 0)
+            return entry;
+        entry = entry->next;
+    }
+
+    return NULL;
+}
+
+static BOOLEAN ProcessServer_GetCachedBreakoutProcessMatch(
+    const PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* cache,
+    const WCHAR* imageName,
+    const WCHAR* appPath,
+    ULONG appPathLen,
+    WCHAR* outTarget,
+    size_t outTargetCch,
+    BOOLEAN* outHasTarget,
+    BOOLEAN* outHasPriority,
+    LONG* outPriority)
+{
+    SBIE_RT_MATCH force_process_match;
+    SBIE_RT_MATCH force_children_match;
+    SBIE_RT_MATCH breakout_process_match;
+
+    ProcessServer_RuntimeCopyMatch(NULL, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+
+    if (!cache || !imageName || !*imageName || !appPath || !appPathLen)
+        return FALSE;
+
+    ProgramControl_RuntimeInitMatch(&force_process_match);
+    ProgramControl_RuntimeInitMatch(&force_children_match);
+    ProgramControl_RuntimeInitMatch(&breakout_process_match);
+
+    if (!ProgramControl_RuntimeMatchProcess(
+            &cache->ruleset,
+            imageName,
+            appPath,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            &force_process_match,
+            &force_children_match,
+            &breakout_process_match))
+        return FALSE;
+
+    if (!breakout_process_match.matched)
+        return FALSE;
+
+    ProcessServer_RuntimeCopyMatch(&breakout_process_match, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+    return TRUE;
+}
+
+static BOOLEAN ProcessServer_GetCachedBreakoutFolderMatch(
+    const PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* cache,
+    const WCHAR* imageName,
+    const WCHAR* appPath,
+    ULONG appDirLen,
+    BOOLEAN* outHasTarget,
+    WCHAR* outTarget,
+    size_t outTargetCch,
+    BOOLEAN* outHasPriority,
+    LONG* outPriority)
+{
+    SBIE_RT_MATCH force_folder_match;
+    SBIE_RT_MATCH breakout_folder_match;
+    BOOLEAN hasTarget = FALSE;
+
+    if (outHasTarget)
+        *outHasTarget = FALSE;
+    if (outTarget && outTargetCch)
+        outTarget[0] = L'\0';
+    if (outHasPriority)
+        *outHasPriority = FALSE;
+    if (outPriority)
+        *outPriority = -1;
+
+    if (!cache || !imageName || !*imageName || !appPath || !appDirLen)
+        return FALSE;
+
+    ProgramControl_RuntimeInitMatch(&force_folder_match);
+    ProgramControl_RuntimeInitMatch(&breakout_folder_match);
+
+    if (!ProgramControl_RuntimeMatchFolder(
+            &cache->ruleset,
+            imageName,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            appPath,
+            appDirLen,
+            &force_folder_match,
+            &breakout_folder_match))
+        return FALSE;
+
+    if (!breakout_folder_match.matched)
+        return FALSE;
+
+    ProcessServer_RuntimeCopyMatch(&breakout_folder_match, &hasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+    if (outHasTarget)
+        *outHasTarget = hasTarget ? TRUE : FALSE;
+    return TRUE;
+}
+
+static BOOLEAN ProcessServer_GetCachedBreakoutDocumentMatch(
+    const PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* cache,
+    const WCHAR* imageName,
+    const WCHAR* docPath,
+    ULONG docPathLen,
+    BOOLEAN* outHasPriority,
+    LONG* outPriority,
+    BOOLEAN* outHasTarget,
+    WCHAR* outTarget,
+    size_t outTargetCch)
+{
+    SBIE_RT_MATCH breakout_document_match;
+
+    ProcessServer_RuntimeCopyMatch(NULL, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+
+    if (!cache || !imageName || !*imageName || !docPath || !docPathLen)
+        return FALSE;
+
+    ProgramControl_RuntimeInitMatch(&breakout_document_match);
+
+    if (!ProgramControl_RuntimeMatchDocument(
+            &cache->ruleset,
+            imageName,
+            ProcessServer_BreakoutMatchImage,
+            NULL,
+            docPath,
+            docPathLen,
+            &breakout_document_match)) {
+        if (cache->ruleset.breakout_document.count &&
+            SbieDll_CheckPatternInList(docPath, docPathLen, cache->boxname, L"BreakoutDocument")) {
+            if (outHasTarget)
+                *outHasTarget = FALSE;
+            if (outHasPriority)
+                *outHasPriority = FALSE;
+            if (outPriority)
+                *outPriority = -1;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (!breakout_document_match.matched)
+        return FALSE;
+
+    ProcessServer_RuntimeCopyMatch(&breakout_document_match, outHasTarget, outTarget, outTargetCch, outHasPriority, outPriority);
+    return TRUE;
+}
+
+static void ProcessServer_GetBreakoutState(
+    const WCHAR* boxname,
+    ULONG callerPid,
+    const WCHAR* launchImageName,
+    const WCHAR* folderScopeImage,
+    WCHAR* launchPath,
+    ULONG launchDirLen,
+    const WCHAR* docPath,
+    ULONG docPathLen,
+    PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY** breakout_rule_cache,
+    BOOLEAN* ioHostPathKnown,
+    BOOLEAN* ioHostPathResult,
+    BOOLEAN* outBreakoutProcess,
+    BOOLEAN* outBreakoutFolder,
+    BOOLEAN* outBreakoutDocument,
+    BOOLEAN* outBreakoutHasTarget,
+    WCHAR* outBreakoutTarget,
+    size_t outBreakoutTargetCch,
+    BOOLEAN* outBreakoutHasPriority,
+    LONG* outBreakoutPriority)
+{
+    PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* cache;
+    const ULONG launchPathLen = (ULONG)wcslen(launchPath);
+    BOOLEAN breakout_process = FALSE;
+    BOOLEAN breakout_folder = FALSE;
+    BOOLEAN breakout_document = FALSE;
+    BOOLEAN breakout_process_has_target = FALSE;
+    BOOLEAN breakout_folder_has_target = FALSE;
+    BOOLEAN breakout_document_has_target = FALSE;
+    BOOLEAN breakout_process_has_priority = FALSE;
+    LONG breakout_process_priority = -1;
+    BOOLEAN breakout_folder_has_priority = FALSE;
+    LONG breakout_folder_priority = -1;
+    BOOLEAN breakout_document_has_priority = FALSE;
+    LONG breakout_document_priority = -1;
+    WCHAR breakout_process_target[BOXNAME_COUNT] = { 0 };
+    WCHAR breakout_folder_target[BOXNAME_COUNT] = { 0 };
+    WCHAR breakout_document_target[BOXNAME_COUNT] = { 0 };
+
+    if (outBreakoutProcess)
+        *outBreakoutProcess = FALSE;
+    if (outBreakoutFolder)
+        *outBreakoutFolder = FALSE;
+    if (outBreakoutDocument)
+        *outBreakoutDocument = FALSE;
+    if (outBreakoutHasTarget)
+        *outBreakoutHasTarget = FALSE;
+    if (outBreakoutTarget && outBreakoutTargetCch)
+        outBreakoutTarget[0] = L'\0';
+    if (outBreakoutHasPriority)
+        *outBreakoutHasPriority = FALSE;
+    if (outBreakoutPriority)
+        *outBreakoutPriority = -1;
+
+    cache = ProcessServer_GetBreakoutRuleCacheEntry(boxname, breakout_rule_cache);
+    if (!cache) {
+        if (!ProcessServer_AreBreakoutRulesEnabled(boxname))
+            return;
+
+        breakout_process = ProcessServer_GetBreakoutProcessMatch(
+            boxname,
+            launchImageName,
+            launchPath,
+            launchPathLen,
+            breakout_process_target,
+            BOXNAME_COUNT,
+            &breakout_process_has_target,
+            &breakout_process_has_priority,
+            &breakout_process_priority) ? TRUE : FALSE;
+        if (breakout_process) {
+            if (ioHostPathKnown && ioHostPathResult) {
+                if (!*ioHostPathKnown) {
+                    *ioHostPathResult = IsHostPath((HANDLE)(ULONG_PTR)callerPid, launchPath) ? TRUE : FALSE;
+                    *ioHostPathKnown = TRUE;
+                }
+                breakout_process = *ioHostPathResult;
+            }
+            else {
+                breakout_process = IsHostPath((HANDLE)(ULONG_PTR)callerPid, launchPath) ? TRUE : FALSE;
+            }
+        }
+
+        breakout_folder = ProcessServer_GetBreakoutFolderTarget(
+            boxname,
+            folderScopeImage,
+            launchPath,
+            launchDirLen,
+                breakout_folder_target,
+                BOXNAME_COUNT,
+                &breakout_folder_has_priority,
+                &breakout_folder_priority) ? TRUE : FALSE;
+    }
+    else {
+        if (!cache->has_breakout_rules)
+            return;
+
+        breakout_process = ProcessServer_GetCachedBreakoutProcessMatch(
+            cache,
+            launchImageName,
+            launchPath,
+            launchPathLen,
+            NULL,
+            0,
+            NULL,
+            NULL,
+            NULL) ? TRUE : FALSE;
+        if (breakout_process) {
+            if (ioHostPathKnown && ioHostPathResult) {
+                if (!*ioHostPathKnown) {
+                    *ioHostPathResult = IsHostPath((HANDLE)(ULONG_PTR)callerPid, launchPath) ? TRUE : FALSE;
+                    *ioHostPathKnown = TRUE;
+                }
+                breakout_process = *ioHostPathResult;
+            }
+            else {
+                breakout_process = IsHostPath((HANDLE)(ULONG_PTR)callerPid, launchPath) ? TRUE : FALSE;
+            }
+        }
+
+        breakout_folder = ProcessServer_GetCachedBreakoutFolderMatch(
+            cache,
+            folderScopeImage,
+            launchPath,
+            launchDirLen,
+            NULL,
+            NULL,
+            0,
+            NULL,
+            NULL) ? TRUE : FALSE;
+
+        if (breakout_process) {
+            breakout_process = ProcessServer_GetCachedBreakoutProcessMatch(
+                cache,
+                launchImageName,
+                launchPath,
+                launchPathLen,
+                breakout_process_target,
+                BOXNAME_COUNT,
+                &breakout_process_has_target,
+                &breakout_process_has_priority,
+                &breakout_process_priority) ? TRUE : FALSE;
+        }
+
+        if (breakout_folder)
+            breakout_folder = ProcessServer_GetCachedBreakoutFolderMatch(
+                cache,
+                folderScopeImage,
+                launchPath,
+                launchDirLen,
+                &breakout_folder_has_target,
+                breakout_folder_target,
+                BOXNAME_COUNT,
+                &breakout_folder_has_priority,
+                &breakout_folder_priority) ? TRUE : FALSE;
+    }
+
+    if (!breakout_process) {
+        breakout_process_has_target = FALSE;
+        breakout_process_target[0] = L'\0';
+        breakout_process_has_priority = FALSE;
+        breakout_process_priority = -1;
+    }
+
+    if (docPath && docPathLen) {
+        BOOLEAN cand_has_priority = FALSE;
+        LONG cand_priority = -1;
+        BOOLEAN cand_has_target = FALSE;
+        WCHAR cand_target[BOXNAME_COUNT] = { 0 };
+
+        if ((cache && ProcessServer_GetCachedBreakoutDocumentMatch(
+                cache,
+                folderScopeImage,
+                docPath,
+                docPathLen,
+                &cand_has_priority,
+                &cand_priority,
+                &cand_has_target,
+                cand_target,
+                BOXNAME_COUNT)) ||
+            (!cache && ProcessServer_GetBreakoutDocumentMatch(
+                boxname,
+                folderScopeImage,
+                docPath,
+                docPathLen,
+                &cand_has_priority,
+                &cand_priority,
+                &cand_has_target,
+                cand_target,
+                BOXNAME_COUNT))) {
+            breakout_document = TRUE;
+            breakout_document_has_priority = cand_has_priority;
+            breakout_document_priority = cand_priority;
+            breakout_document_has_target = cand_has_target;
+            if (cand_has_target)
+                wcscpy(breakout_document_target, cand_target);
+            else
+                breakout_document_target[0] = L'\0';
+        }
+
+        if (_wcsicmp(folderScopeImage, launchImageName) != 0) {
+            cand_has_priority = FALSE;
+            cand_priority = -1;
+            cand_has_target = FALSE;
+            cand_target[0] = L'\0';
+
+            if ((cache && ProcessServer_GetCachedBreakoutDocumentMatch(
+                    cache,
+                    launchImageName,
+                    docPath,
+                    docPathLen,
+                    &cand_has_priority,
+                    &cand_priority,
+                    &cand_has_target,
+                    cand_target,
+                    BOXNAME_COUNT)) ||
+            (!cache && ProcessServer_GetBreakoutDocumentMatch(
+                    boxname,
+                    launchImageName,
+                    docPath,
+                    docPathLen,
+                    &cand_has_priority,
+                    &cand_priority,
+                    &cand_has_target,
+                    cand_target,
+                    BOXNAME_COUNT))) {
+                if (!breakout_document || ProgramControl_ShouldReplaceTargetMatch(
+                        breakout_document ? 1 : 0,
+                        breakout_document_has_priority ? 1 : 0,
+                        breakout_document_priority,
+                        2,
+                        cand_has_priority ? 1 : 0,
+                        cand_priority,
+                        2)) {
+                    breakout_document = TRUE;
+                    breakout_document_has_priority = cand_has_priority;
+                    breakout_document_priority = cand_priority;
+                    breakout_document_has_target = cand_has_target;
+                    if (cand_has_target)
+                        wcscpy(breakout_document_target, cand_target);
+                    else
+                        breakout_document_target[0] = L'\0';
+                }
+            }
+        }
+    }
+
+    if (outBreakoutProcess)
+        *outBreakoutProcess = breakout_process;
+    if (outBreakoutFolder)
+        *outBreakoutFolder = breakout_folder;
+    if (outBreakoutDocument)
+        *outBreakoutDocument = breakout_document;
+
+    if (outBreakoutHasTarget || (outBreakoutTarget && outBreakoutTargetCch)) {
+        enum {
+            BREAKOUT_WIN_NONE = 0,
+            BREAKOUT_WIN_PROCESS,
+            BREAKOUT_WIN_FOLDER,
+            BREAKOUT_WIN_DOCUMENT
+        } breakout_winner = BREAKOUT_WIN_NONE;
+        BOOLEAN winner_has_target = FALSE;
+        const WCHAR* winner_target = NULL;
+
+        if (breakout_process || breakout_folder) {
+            if (breakout_process && breakout_folder) {
+                if (breakout_process_has_priority != breakout_folder_has_priority)
+                    breakout_winner = breakout_process_has_priority ? BREAKOUT_WIN_PROCESS : BREAKOUT_WIN_FOLDER;
+                else if (breakout_process_has_priority && breakout_folder_has_priority) {
+                    if (breakout_process_priority < breakout_folder_priority)
+                        breakout_winner = BREAKOUT_WIN_PROCESS;
+                    else if (breakout_process_priority > breakout_folder_priority)
+                        breakout_winner = BREAKOUT_WIN_FOLDER;
+                    else
+                        breakout_winner = BREAKOUT_WIN_PROCESS;
+                }
+                else {
+                    breakout_winner = BREAKOUT_WIN_PROCESS;
+                }
+            }
+            else {
+                breakout_winner = breakout_process ? BREAKOUT_WIN_PROCESS : BREAKOUT_WIN_FOLDER;
+            }
+        }
+
+        if (breakout_document) {
+            if (breakout_winner == BREAKOUT_WIN_NONE) {
+                breakout_winner = BREAKOUT_WIN_DOCUMENT;
+            }
+            else {
+                BOOLEAN current_has_priority = FALSE;
+                LONG current_priority = -1;
+
+                if (breakout_winner == BREAKOUT_WIN_PROCESS) {
+                    current_has_priority = breakout_process_has_priority;
+                    current_priority = breakout_process_priority;
+                }
+                else if (breakout_winner == BREAKOUT_WIN_FOLDER) {
+                    current_has_priority = breakout_folder_has_priority;
+                    current_priority = breakout_folder_priority;
+                }
+
+                if (ProgramControl_IsPrimaryPreferredByPriority(
+                        breakout_document_has_priority ? breakout_document_priority : -1,
+                        current_has_priority ? current_priority : -1,
+                        1))
+                    breakout_winner = BREAKOUT_WIN_DOCUMENT;
+            }
+        }
+
+        if (breakout_winner == BREAKOUT_WIN_PROCESS) {
+            winner_has_target = breakout_process_has_target;
+            winner_target = breakout_process_target;
+        }
+        else if (breakout_winner == BREAKOUT_WIN_FOLDER) {
+            winner_has_target = breakout_folder_has_target;
+            winner_target = breakout_folder_target;
+        }
+        else if (breakout_winner == BREAKOUT_WIN_DOCUMENT) {
+            winner_has_target = breakout_document_has_target;
+            winner_target = breakout_document_target;
+        }
+
+        if (outBreakoutHasTarget)
+            *outBreakoutHasTarget = winner_has_target;
+
+        if (winner_has_target && winner_target && outBreakoutTarget && outBreakoutTargetCch)
+            wcscpy(outBreakoutTarget, winner_target);
+    }
+
+    if (outBreakoutHasPriority || outBreakoutPriority) {
+        BOOLEAN breakout_has_priority = FALSE;
+        LONG breakout_priority = -1;
+
+        if (breakout_process_has_priority || breakout_folder_has_priority) {
+            if (breakout_process_has_priority && breakout_folder_has_priority)
+                breakout_priority = (breakout_process_priority < breakout_folder_priority) ? breakout_process_priority : breakout_folder_priority;
+            else if (breakout_process_has_priority)
+                breakout_priority = breakout_process_priority;
+            else
+                breakout_priority = breakout_folder_priority;
+
+            breakout_has_priority = TRUE;
+        }
+
+        if (breakout_document_has_priority && (!breakout_has_priority || breakout_document_priority < breakout_priority)) {
+            breakout_has_priority = TRUE;
+            breakout_priority = breakout_document_priority;
+        }
+
+        if (outBreakoutHasPriority)
+            *outBreakoutHasPriority = breakout_has_priority;
+        if (outBreakoutPriority)
+            *outBreakoutPriority = breakout_priority;
+    }
+}
+
+static SBIE_POLICY_DECISION ProcessServer_ResolveProcessPolicy(
+    BOOLEAN caller_forced_by_children,
+    BOOLEAN source_equals_candidate_box,
+    BOOLEAN force_process_match,
+    BOOLEAN force_folder_match,
+    BOOLEAN force_children_match,
+    BOOLEAN breakout_process_match,
+    BOOLEAN breakout_folder_match,
+    BOOLEAN breakout_document_match,
+    BOOLEAN breakout_has_target,
+    BOOLEAN force_has_priority,
+    LONG force_priority,
+    BOOLEAN breakout_has_priority,
+    LONG breakout_priority)
+{
+    SBIE_RULE_MATCH_SET matches;
+    SBIE_POLICY_INPUT in;
+
+    memzero(&matches, sizeof(matches));
+    memzero(&in, sizeof(in));
+
+    matches.force_process_match = force_process_match ? 1 : 0;
+    matches.force_folder_match = force_folder_match ? 1 : 0;
+    matches.force_children_match = force_children_match ? 1 : 0;
+    matches.breakout_process_match = breakout_process_match ? 1 : 0;
+    matches.breakout_folder_match = breakout_folder_match ? 1 : 0;
+    matches.breakout_document_match = breakout_document_match ? 1 : 0;
+    matches.breakout_has_target = breakout_has_target ? 1 : 0;
+
+    in.context_kind = SBIE_CTX_SANDBOXED_PROCESS_START;
+    in.caller_forced_by_children = caller_forced_by_children ? 1 : 0;
+    in.source_equals_candidate_box = source_equals_candidate_box ? 1 : 0;
+
+    // Priority arbitration: only breakout-with-lower-priority wins over force;
+    // default (no priority) is force wins.
+    return SbiePolicy_ResolveWithPriorities(
+        &in,
+        &matches,
+        FALSE,
+        force_has_priority ? 1 : 0,
+        force_priority,
+        breakout_has_priority ? 1 : 0,
+        breakout_priority);
+}
+
+static void ProcessServer_AssignForceWinner(
+    BOOLEAN source_equals_candidate_box,
+    BOOLEAN candidate_has_priority,
+    LONG candidate_priority,
+    const WCHAR* candidate_box,
+    BOOLEAN* out_have_winner,
+    BOOLEAN* out_winner_source_equals,
+    BOOLEAN* out_winner_has_priority,
+    LONG* out_winner_priority,
+    WCHAR* out_winner_box)
+{
+    *out_have_winner = TRUE;
+    *out_winner_source_equals = source_equals_candidate_box;
+    *out_winner_has_priority = candidate_has_priority;
+    *out_winner_priority = candidate_priority;
+    wcscpy(out_winner_box, candidate_box);
+}
+
+// Returns TRUE only when caller should stop scanning remaining boxes.
+static BOOLEAN ProcessServer_UpdateForceWinnerAndCheckStop(
+    BOOLEAN use_rule_extensions,
+    BOOLEAN source_equals_candidate_box,
+    BOOLEAN candidate_has_priority,
+    LONG candidate_priority,
+    const WCHAR* candidate_box,
+    BOOLEAN* out_have_winner,
+    BOOLEAN* out_winner_source_equals,
+    BOOLEAN* out_winner_has_priority,
+    LONG* out_winner_priority,
+    WCHAR* out_winner_box)
+{
+    if (!use_rule_extensions) {
+        if (!*out_have_winner) {
+            ProcessServer_AssignForceWinner(
+                source_equals_candidate_box,
+                candidate_has_priority,
+                candidate_priority,
+                candidate_box,
+                out_have_winner,
+                out_winner_source_equals,
+                out_winner_has_priority,
+                out_winner_priority,
+                out_winner_box);
+        }
+
+        // Legacy behavior: first force winner across boxes.
+        return TRUE;
+    }
+
+    if (ProgramControl_ShouldReplacePriorityWinner(
+            *out_have_winner ? 1 : 0,
+            *out_winner_has_priority ? 1 : 0,
+            *out_winner_priority,
+            candidate_has_priority ? 1 : 0,
+            candidate_priority)) {
+        ProcessServer_AssignForceWinner(
+            source_equals_candidate_box,
+            candidate_has_priority,
+            candidate_priority,
+            candidate_box,
+            out_have_winner,
+            out_winner_source_equals,
+            out_winner_has_priority,
+            out_winner_priority,
+            out_winner_box);
+    }
+
+    return FALSE;
 }
 
 //---------------------------------------------------------------------------
@@ -556,6 +1914,10 @@ MSG_HEADER *ProcessServer::RunSandboxedHandler(MSG_HEADER *msg)
             WCHAR sid[96];
             ULONG session_id;
             BOOL FilterHandles = FALSE;
+            BOOLEAN host_path_known = FALSE;
+            BOOLEAN host_path_result = FALSE;
+            PROCESSSERVER_BOX_ENABLED_CACHE_ENTRY* box_enabled_cache = NULL;
+            PROCESSSERVER_BREAKOUT_RELEVANCE_CACHE_ENTRY* breakout_relevance_cache = NULL;
 
             if (SbieApi_QueryProcessInfo((HANDLE)(ULONG_PTR)CallerPid, 0)) {
                 CallerInSandbox = true;
@@ -579,7 +1941,7 @@ MSG_HEADER *ProcessServer::RunSandboxedHandler(MSG_HEADER *msg)
             }
 
 #ifndef DRV_BREAKOUT
-            if (CallerInSandbox && wcscmp(req->boxname, L"*UNBOXED*") == 0 && *cmd == L'\"') {
+            if (CallerInSandbox && wcscmp(req->boxname, L"*UNBOXED*") == 0) {
 
                 //ULONG flags = 0;
                 //if (!NT_SUCCESS(SbieApi_Call(API_QUERY_DRIVER_INFO, 2, 0, (ULONG_PTR)&flags)) || (flags & SBIE_FEATURE_FLAG_CERTIFIED) == 0) {
@@ -591,25 +1953,301 @@ MSG_HEADER *ProcessServer::RunSandboxedHandler(MSG_HEADER *msg)
                 //    goto end;
                 //} 
 
-                WCHAR* lpApplicationName = cmd + 1;
-                WCHAR* ptr = wcschr(lpApplicationName, L'\"');
+                WCHAR* cmd_start = cmd;
+                while (*cmd_start == L' ' || *cmd_start == L'\t')
+                    ++cmd_start;
+
+                WCHAR* lpApplicationName = cmd_start;
+                WCHAR* ptr = NULL;
+                WCHAR saved_sep = L'\0';
+
+                if (*lpApplicationName == L'\"') {
+                    ++lpApplicationName;
+                    ptr = wcschr(lpApplicationName, L'\"');
+                }
+                else {
+                    ptr = lpApplicationName;
+                    while (*ptr && *ptr != L' ' && *ptr != L'\t')
+                        ++ptr;
+                }
+
                 if (ptr) {
+                    saved_sep = *ptr;
                     *ptr = L'\0'; // end cmd where lpApplicationName ends
+
+                    // Document authorization is handled by UserServer using the registered handler.
+                    const WCHAR* docPath = NULL;
+                    ULONG docPathLen = 0;
+
                     WCHAR* lpProgram = wcsrchr(lpApplicationName, L'\\');
                     if (lpProgram) {
+                        WCHAR CallerImagePath[MAX_PATH] = { 0 };
+                        DWORD CallerImagePathLen = MAX_PATH;
+                        const WCHAR* callerProgram = NULL;
+                        const WCHAR* callerImageSlash = NULL;
+                        ULONG callerImageDirLen = 0;
 
-                        //
+                        if (QueryFullProcessImageNameW(CallerProcessHandle, 0, CallerImagePath, &CallerImagePathLen)) {
+                            callerImageSlash = wcsrchr(CallerImagePath, L'\\');
+                            if (callerImageSlash && callerImageSlash[1]) {
+                                callerProgram = callerImageSlash + 1;
+                                callerImageDirLen = (ULONG)(callerImageSlash - CallerImagePath);
+                            } else {
+                                callerProgram = NULL;
+                            }
+                        }
+
+                        const WCHAR* folderScopeImage = callerProgram ? callerProgram : (lpProgram + 1);
+
                         // check if the process/directory is configured for breakout
-                        // if its a BreakoutProcess we must also test if the path is not in the sandbox itself
+                        // if its a BreakoutProcess or BreakoutFolder we must also test if the path is not in the sandbox itself
                         //
 
-                        if ((SbieDll_CheckStringInList(lpProgram + 1, boxname, L"BreakoutProcess")
-                            && IsHostPath((HANDLE)(ULONG_PTR)CallerPid, lpApplicationName))
-                            || SbieDll_CheckPatternInList(lpApplicationName, (ULONG)(lpProgram - lpApplicationName), boxname, L"BreakoutFolder")) {
+                        const BOOLEAN breakout_rules_enabled = ProcessServer_AreBreakoutRulesEnabled(boxname);
+                        bool breakout_process = false;
+                        BOOLEAN breakout_process_has_target = FALSE;
+                        BOOLEAN breakout_process_has_priority = FALSE;
+                        LONG breakout_process_priority = -1;
+                        WCHAR breakout_process_target[BOXNAME_COUNT] = { 0 };
+
+                        if (breakout_rules_enabled) {
+                            breakout_process = ProcessServer_GetBreakoutProcessMatch(
+                                boxname,
+                                lpProgram + 1,
+                                lpApplicationName,
+                                (ULONG)wcslen(lpApplicationName),
+                                breakout_process_target,
+                                BOXNAME_COUNT,
+                                &breakout_process_has_target,
+                                &breakout_process_has_priority,
+                                &breakout_process_priority);
+                        }
+                        if (!breakout_rules_enabled)
+                            breakout_process = false;
+                        if (breakout_process) {
+                            if (!host_path_known) {
+                                host_path_result = IsHostPath((HANDLE)(ULONG_PTR)CallerPid, lpApplicationName) ? TRUE : FALSE;
+                                host_path_known = TRUE;
+                            }
+                            breakout_process = host_path_result ? true : false;
+                        }
+                        if (!breakout_process) {
+                            breakout_process_has_target = FALSE;
+                            breakout_process_target[0] = L'\0';
+                            breakout_process_has_priority = FALSE;
+                            breakout_process_priority = -1;
+                        }
+                        bool breakout_folder = false;
+                        BOOLEAN breakout_folder_has_priority = FALSE;
+                        LONG breakout_folder_priority = -1;
+                        WCHAR breakout_folder_target[BOXNAME_COUNT] = { 0 };
+                        if (breakout_rules_enabled) {
+                            breakout_folder = ProcessServer_GetBreakoutFolderTarget(
+                                boxname,
+                                folderScopeImage,
+                                lpApplicationName,
+                                (ULONG)(lpProgram - lpApplicationName),
+                                breakout_folder_target,
+                                BOXNAME_COUNT,
+                                &breakout_folder_has_priority,
+                                &breakout_folder_priority);
+                        }
+                        if (!breakout_rules_enabled)
+                            breakout_folder = false;
+                        bool breakout_document = false;
+                        BOOLEAN breakout_document_has_priority = FALSE;
+                        LONG breakout_document_priority = -1;
+
+                        if (breakout_rules_enabled && docPath && docPathLen) {
+                            BOOLEAN cand_has_priority = FALSE;
+                            LONG cand_priority = -1;
+                            BOOLEAN cand_has_target = FALSE;
+                            WCHAR cand_target[BOXNAME_COUNT] = { 0 };
+
+                            if (ProcessServer_GetBreakoutDocumentMatch(
+                                    boxname,
+                                    folderScopeImage,
+                                    docPath,
+                                    docPathLen,
+                                    &cand_has_priority,
+                                    &cand_priority,
+                                    &cand_has_target,
+                                    cand_target,
+                                    BOXNAME_COUNT)) {
+                                breakout_document = true;
+                                breakout_document_has_priority = cand_has_priority;
+                                breakout_document_priority = cand_priority;
+                            }
+
+                            if (_wcsicmp(folderScopeImage, lpProgram + 1) != 0) {
+                                cand_has_priority = FALSE;
+                                cand_priority = -1;
+                                cand_has_target = FALSE;
+                                cand_target[0] = L'\0';
+
+                                if (ProcessServer_GetBreakoutDocumentMatch(
+                                        boxname,
+                                        lpProgram + 1,
+                                        docPath,
+                                        docPathLen,
+                                        &cand_has_priority,
+                                        &cand_priority,
+                                        &cand_has_target,
+                                        cand_target,
+                                        BOXNAME_COUNT)) {
+                                    if (!breakout_document || ProgramControl_ShouldReplaceTargetMatch(
+                                            breakout_document ? 1 : 0,
+                                            breakout_document_has_priority ? 1 : 0,
+                                            breakout_document_priority,
+                                            2,
+                                            cand_has_priority ? 1 : 0,
+                                            cand_priority,
+                                            2)) {
+                                        breakout_document = true;
+                                        breakout_document_has_priority = cand_has_priority;
+                                        breakout_document_priority = cand_priority;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (breakout_process || breakout_folder) {
 
                             //
                             // this is a breakout process, it is allowed to leave the sandbox
                             //
+
+                            WCHAR SourceBox[BOXNAME_COUNT];
+                            wcscpy(SourceBox, boxname);
+                            ULONG CallerProcessFlags = (ULONG)SbieApi_QueryProcessInfo((HANDLE)(ULONG_PTR)CallerPid, 0);
+
+                            // Extract breakout priority for numeric arbitration.
+                            // Must be done before the ForceChildren check so the priority can influence it.
+                            BOOLEAN breakout_has_priority = FALSE;
+                            LONG breakout_priority = -1;
+
+                            if (breakout_process_has_priority || breakout_folder_has_priority) {
+                                if (breakout_process_has_priority && breakout_folder_has_priority)
+                                    breakout_priority = (breakout_process_priority < breakout_folder_priority) ? breakout_process_priority : breakout_folder_priority;
+                                else if (breakout_process_has_priority)
+                                    breakout_priority = breakout_process_priority;
+                                else
+                                    breakout_priority = breakout_folder_priority;
+
+                                breakout_has_priority = TRUE;
+                            }
+
+                            if (breakout_document_has_priority && (!breakout_has_priority || breakout_document_priority < breakout_priority)) {
+                                breakout_has_priority = TRUE;
+                                breakout_priority = breakout_document_priority;
+                            }
+
+                            // If caller inherits forced-by-children lineage, deny breakout
+                            // unless the breakout rule's priority explicitly beats the force priority.
+                            // This mirrors the reference: keep ForceChildren-forced callers boxed
+                            // unless breakout is explicitly prioritized above the force.
+                            if ((CallerProcessFlags & SBIE_FLAG_FORCED_CHILD_PROCESS) &&
+                                ProcessServer_AreForceRulesEnabled(SourceBox)) {
+                                BOOLEAN source_fc_has_priority = FALSE;
+                                LONG source_fc_priority = -1;
+                                ProcessServer_GetSettingMinPriority(SourceBox, L"ForceChildren", &source_fc_has_priority, &source_fc_priority);
+
+                                // Breakout wins only if it has an explicit priority that beats the force priority.
+                                BOOLEAN breakout_wins = SbiePolicy_ShouldPrioritizeBreakout(
+                                    FALSE,
+                                    source_fc_has_priority ? 1 : 0,
+                                    source_fc_priority,
+                                    breakout_has_priority ? 1 : 0,
+                                    breakout_priority) ? TRUE : FALSE;
+                                if (!breakout_wins) {
+                                    lvl = 0;
+                                    err = ERROR_NOT_SUPPORTED;
+                                    goto end;
+                                }
+                            }
+
+                            // For sandboxed callers without SBIE_FLAG_FORCED_CHILD_PROCESS, walk the process
+                            // tree to check if any sandboxed ancestor in the source box matches ForceChildren.
+                            // The driver now propagates forced_by_children for direct descendants, but this
+                            // ancestor walk remains as a conservative fallback for lineage edge cases where
+                            // the explicit flag may be unavailable at this decision point.
+                            if (CallerInSandbox &&
+                                !(CallerProcessFlags & SBIE_FLAG_FORCED_CHILD_PROCESS) &&
+                                ProcessServer_AreForceRulesEnabled(SourceBox)) {
+                                HANDLE AncestorHandle = CallerProcessHandle;
+                                BOOLEAN ancestor_deny = FALSE;
+                                BOOLEAN ancestor_fc_has_priority = FALSE;
+                                LONG ancestor_fc_priority = -1;
+                                BOOLEAN need_close = FALSE;
+
+                                for (ULONG depth = 0; depth < 8 && !ancestor_deny; depth++) {
+                                    PROCESS_BASIC_INFORMATION pbi;
+                                    NTSTATUS status = NtQueryInformationProcess(AncestorHandle, ProcessBasicInformation, &pbi, sizeof(pbi), NULL);
+
+                                    if (need_close) {
+                                        CloseHandle(AncestorHandle);
+                                        AncestorHandle = NULL;
+                                        need_close = FALSE;
+                                    }
+
+                                    if (!NT_SUCCESS(status))
+                                        break;
+
+                                    ULONG AncParentPid = (ULONG)(ULONG_PTR)pbi.InheritedFromUniqueProcessId;
+                                    HANDLE AncParentHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, AncParentPid);
+                                    if (!AncParentHandle)
+                                        break;
+
+                                    // Check if this ancestor is sandboxed in the source box.
+                                    if (!SbieApi_QueryProcessInfo((HANDLE)(ULONG_PTR)AncParentPid, 0)) {
+                                        CloseHandle(AncParentHandle);
+                                        break; // Not sandboxed; stop walking.
+                                    }
+                                    WCHAR AncParentBox[BOXNAME_COUNT] = { 0 };
+                                    SbieApi_QueryProcess((HANDLE)(ULONG_PTR)AncParentPid, AncParentBox, NULL, NULL, NULL);
+                                    if (_wcsicmp(AncParentBox, SourceBox) != 0) {
+                                        CloseHandle(AncParentHandle);
+                                        break; // Different box; stop walking.
+                                    }
+
+                                    // Get ancestor image name and check against ForceChildren rules.
+                                    WCHAR AncParentPath[MAX_PATH];
+                                    ULONG AncParentPathLen = ARRAYSIZE(AncParentPath);
+                                    if (QueryFullProcessImageNameW(AncParentHandle, 0, AncParentPath, &AncParentPathLen)) {
+                                        const WCHAR *AncParentSlash = wcsrchr(AncParentPath, L'\\');
+                                        if (AncParentSlash && AncParentSlash[1]) {
+                                            BOOLEAN afc_has_prio = FALSE;
+                                            LONG afc_prio = -1;
+                                                if (ProcessServer_CheckForceChildrenMatch(SourceBox, AncParentSlash + 1, AncParentPath,
+                                                    (ULONG)(AncParentSlash - AncParentPath), ProcessServer_UseRuleExtensions(SourceBox), &afc_has_prio, &afc_prio)) {
+                                                ancestor_fc_has_priority = afc_has_prio;
+                                                ancestor_fc_priority = afc_prio;
+                                                ancestor_deny = TRUE;
+                                            }
+                                        }
+                                    }
+
+                                    AncestorHandle = AncParentHandle;
+                                    need_close = TRUE;
+                                }
+
+                                if (need_close && AncestorHandle)
+                                    CloseHandle(AncestorHandle);
+
+                                if (ancestor_deny) {
+                                    BOOLEAN breakout_wins = SbiePolicy_ShouldPrioritizeBreakout(
+                                        FALSE,
+                                        ancestor_fc_has_priority ? 1 : 0,
+                                        ancestor_fc_priority,
+                                        breakout_has_priority ? 1 : 0,
+                                        breakout_priority) ? TRUE : FALSE;
+                                    if (!breakout_wins) {
+                                        lvl = 0;
+                                        err = ERROR_NOT_SUPPORTED;
+                                        goto end;
+                                    }
+                                }
+                            }
 
                             BoxNameOrModelPid = 0;
                             FilterHandles = TRUE;
@@ -618,44 +2256,260 @@ MSG_HEADER *ProcessServer::RunSandboxedHandler(MSG_HEADER *msg)
                             // check if it should end up in another box
                             //
 
-                            WCHAR BoxName[BOXNAME_COUNT];
-                            int index = -1;
-                            while (1) {
-                                index = SbieApi_EnumBoxesEx(index, BoxName, TRUE);
-                                if (index == -1)
-                                    break;
-                                if (!NT_SUCCESS(SbieApi_Call(API_IS_BOX_ENABLED, 3, (ULONG_PTR)BoxName, (ULONG_PTR)sid, (ULONG_PTR)session_id)))
-                                    continue;
+                            bool explicit_target_invalid = false;
 
-                                if (SbieDll_CheckStringInList(lpProgram + 1, BoxName, L"ForceProcess")
-                                    || SbieDll_CheckPatternInList(lpApplicationName, (ULONG)(lpProgram - lpApplicationName), BoxName, L"ForceFolder")) {
+                            if (BoxNameOrModelPid == 0) {
+                                WCHAR BoxName[BOXNAME_COUNT];
+                                int index = -1;
+                                BOOLEAN have_force_winner = FALSE;
+                                BOOLEAN winner_source_equals = FALSE;
+                                BOOLEAN winner_has_priority = FALSE;
+                                LONG winner_priority = -1;
+                                BOOLEAN source_use_rule_extensions = ProcessServer_UseRuleExtensions(SourceBox);
+                                WCHAR winner_box[BOXNAME_COUNT] = { 0 };
 
-                                    //
-                                    // check if the breakout process is supposed to end in the box it is trying to break out of
-                                    // and deny the breakout in that case, to take the normal process creation route
-                                    // 
-                                    // this happens when a break out is configured globally
-                                    //
+                                while (1) {
+                                    SBIE_POLICY_DECISION decision;
+                                    BOOLEAN force_process_match = FALSE;
+                                    BOOLEAN force_folder_match = FALSE;
+                                    BOOLEAN force_children_match = FALSE;
+                                    BOOLEAN force_process_has_priority = FALSE;
+                                    LONG force_process_priority = -1;
+                                    BOOLEAN force_folder_has_priority = FALSE;
+                                    LONG force_folder_priority = -1;
+                                    BOOLEAN force_children_has_priority = FALSE;
+                                    LONG force_children_priority = -1;
+                                    BOOLEAN force_has_priority = FALSE;
+                                    LONG force_priority = -1;
+                                    BOOLEAN source_equals_candidate_box;
+                                    BOOLEAN candidate_force_rules_enabled;
+                                    BOOLEAN candidate_use_rule_extensions;
+                                    BOOLEAN candidate_breakout_process;
+                                    BOOLEAN candidate_breakout_folder;
+                                    BOOLEAN candidate_breakout_document;
+                                    BOOLEAN candidate_breakout_has_target;
+                                    BOOLEAN candidate_breakout_has_priority;
+                                    LONG candidate_breakout_priority;
+                                    WCHAR candidate_target_box[BOXNAME_COUNT] = { 0 };
 
-                                    if (_wcsicmp(boxname, BoxName) == 0) {
+                                    index = SbieApi_EnumBoxesEx(index, BoxName, TRUE);
+                                    if (index == -1)
+                                        break;
+                                    if (!NT_SUCCESS(ProcessServer_IsBoxEnabledCached(BoxName, sid, session_id, &box_enabled_cache)))
+                                        continue;
+
+                                    source_equals_candidate_box = (_wcsicmp(SourceBox, BoxName) == 0) ? TRUE : FALSE;
+                                    candidate_force_rules_enabled = ProcessServer_AreForceRulesEnabled(BoxName);
+                                    candidate_use_rule_extensions = ProcessServer_UseRuleExtensionsForCandidate(
+                                        source_use_rule_extensions,
+                                        BoxName);
+
+                                    if (candidate_force_rules_enabled) {
+                                        force_process_match = ProcessServer_GetForceProcessMatch(
+                                            BoxName,
+                                            lpProgram + 1,
+                                            lpApplicationName,
+                                            (ULONG)wcslen(lpApplicationName),
+                                            candidate_use_rule_extensions,
+                                            &force_process_has_priority,
+                                            &force_process_priority);
+                                        force_folder_match = ProcessServer_GetForceFolderMatch(
+                                            BoxName,
+                                            folderScopeImage,
+                                            lpApplicationName,
+                                            (ULONG)(lpProgram - lpApplicationName),
+                                            candidate_use_rule_extensions,
+                                            &force_folder_has_priority,
+                                            &force_folder_priority) ? TRUE : FALSE;
+
+                                        if (callerProgram && callerImageDirLen) {
+                                            force_children_match = ProcessServer_CheckForceChildrenMatch(
+                                                BoxName,
+                                                callerProgram,
+                                                CallerImagePath,
+                                                callerImageDirLen,
+                                                candidate_use_rule_extensions,
+                                                &force_children_has_priority,
+                                                &force_children_priority);
+                                        }
+                                    }
+
+                                    // Extract best force priority: ForceProcess by name/path, ForceFolder by path,
+                                    // and ForceChildren by caller image/name.
+                                    if (force_process_match && force_process_has_priority) {
+                                        force_has_priority = TRUE;
+                                        force_priority = force_process_priority;
+                                    }
+                                    if (force_folder_match && force_folder_has_priority &&
+                                        (!force_has_priority || force_folder_priority < force_priority)) {
+                                        force_has_priority = TRUE;
+                                        force_priority = force_folder_priority;
+                                    }
+                                    if (force_children_match && force_children_has_priority && (!force_has_priority || force_children_priority < force_priority)) {
+                                        force_has_priority = TRUE;
+                                        force_priority = force_children_priority;
+                                    }
+
+                                    if (!source_use_rule_extensions) {
+                                        // Legacy mode: keep breakout evaluation scoped to the source box.
+                                        // Other candidate boxes are force-only candidates.
+                                        candidate_breakout_process = source_equals_candidate_box ? breakout_process : FALSE;
+                                        candidate_breakout_folder = source_equals_candidate_box ? breakout_folder : FALSE;
+                                        candidate_breakout_document = source_equals_candidate_box ? breakout_document : FALSE;
+                                        candidate_breakout_has_target = FALSE;
+                                        candidate_target_box[0] = L'\0';
+                                        candidate_breakout_has_priority = FALSE;
+                                        candidate_breakout_priority = -1;
+                                    }
+                                    else {
+                                        // Stage 1 (cheap): evaluate force-side match set first.
+                                        // If no force rule matched and the candidate has no breakout
+                                        // settings at all, stage 2 breakout evaluation cannot affect
+                                        // the outcome for this candidate.
+                                        if (!force_process_match && !force_folder_match && !force_children_match) {
+                                            if (!ProcessServer_HasBreakoutRulesCached(BoxName, &breakout_relevance_cache))
+                                                continue;
+                                        }
+
+                                        // Stage 2 (expensive): full breakout-side evaluation only
+                                        // for candidates that can influence final routing.
+                                        ProcessServer_GetBreakoutState(
+                                            BoxName,
+                                            CallerPid,
+                                            lpProgram + 1,
+                                            folderScopeImage,
+                                            lpApplicationName,
+                                            (ULONG)(lpProgram - lpApplicationName),
+                                            docPath,
+                                            docPathLen,
+                                            &breakout_relevance_cache,
+                                            &host_path_known,
+                                            &host_path_result,
+                                            &candidate_breakout_process,
+                                            &candidate_breakout_folder,
+                                            &candidate_breakout_document,
+                                            &candidate_breakout_has_target,
+                                            candidate_target_box,
+                                            BOXNAME_COUNT,
+                                            &candidate_breakout_has_priority,
+                                            &candidate_breakout_priority);
+                                    }
+
+                                    decision = ProcessServer_ResolveProcessPolicy(
+                                        FALSE,
+                                        source_equals_candidate_box,
+                                        force_process_match,
+                                        force_folder_match,
+                                        force_children_match,
+                                        candidate_breakout_process,
+                                        candidate_breakout_folder,
+                                        candidate_breakout_document,
+                                        candidate_breakout_has_target,
+                                        force_has_priority,
+                                        force_priority,
+                                        candidate_breakout_has_priority,
+                                        candidate_breakout_priority);
+
+                                    if (decision == SBIE_DECISION_BREAKOUT_TARGET_BOX) {
+                                        if (!NT_SUCCESS(ProcessServer_IsBoxEnabledCached(candidate_target_box, sid, session_id, &box_enabled_cache))) {
+                                            explicit_target_invalid = true;
+                                            continue;
+                                        }
+
+                                        if (_wcsicmp(SourceBox, candidate_target_box) == 0) {
+                                            explicit_target_invalid = true;
+                                            continue;
+                                        }
+
+                                        BoxNameOrModelPid = (LONG_PTR)boxname;
+                                        wcscpy(boxname, candidate_target_box);
+                                        break;
+                                    }
+
+                                    if (decision == SBIE_DECISION_FORCE_SAME_BOX ||
+                                        decision == SBIE_DECISION_FORCE_OTHER_BOX) {
+
+                                        if (ProcessServer_UpdateForceWinnerAndCheckStop(
+                                                source_use_rule_extensions,
+                                                source_equals_candidate_box,
+                                                force_has_priority,
+                                                force_priority,
+                                                BoxName,
+                                                &have_force_winner,
+                                                &winner_source_equals,
+                                                &winner_has_priority,
+                                                &winner_priority,
+                                                winner_box)) {
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (!have_force_winner && BoxNameOrModelPid == 0 && source_use_rule_extensions) {
+                                    BOOLEAN source_breakout_has_target = FALSE;
+                                    WCHAR source_target_box[BOXNAME_COUNT] = { 0 };
+
+                                    ProcessServer_GetBreakoutState(
+                                        SourceBox,
+                                        CallerPid,
+                                        lpProgram + 1,
+                                        folderScopeImage,
+                                        lpApplicationName,
+                                        (ULONG)(lpProgram - lpApplicationName),
+                                        docPath,
+                                        docPathLen,
+                                        &breakout_relevance_cache,
+                                        &host_path_known,
+                                        &host_path_result,
+                                        NULL,
+                                        NULL,
+                                        NULL,
+                                        &source_breakout_has_target,
+                                        source_target_box,
+                                        BOXNAME_COUNT,
+                                        NULL,
+                                        NULL);
+
+                                    if (source_breakout_has_target) {
+                                        if (!NT_SUCCESS(ProcessServer_IsBoxEnabledCached(source_target_box, sid, session_id, &box_enabled_cache)) ||
+                                                _wcsicmp(SourceBox, source_target_box) == 0) {
+                                            explicit_target_invalid = true;
+                                        }
+                                        else {
+                                            BoxNameOrModelPid = (LONG_PTR)boxname;
+                                            wcscpy(boxname, source_target_box);
+                                        }
+                                    }
+                                }
+
+                                if (have_force_winner) {
+                                    if (winner_source_equals) {
+
+                                        // Deny breakout; DLL will create the process normally in the sandbox.
                                         lvl = 0;
                                         err = ERROR_NOT_SUPPORTED;
                                         goto end;
                                     }
 
-                                    //
-                                    // set other box
-                                    //
-
+                                    // Force to the selected other box.
                                     BoxNameOrModelPid = (LONG_PTR)boxname;
-                                    wcscpy(boxname, BoxName);
-                                    break;
+                                    wcscpy(boxname, winner_box);
                                 }
+
+                                // If an explicit breakout target is configured but invalid,
+                                // deny breakout and take the normal boxed process creation route.
+                                if (BoxNameOrModelPid == 0 && explicit_target_invalid) {
+                                    lvl = 0;
+                                    err = ERROR_NOT_SUPPORTED;
+                                    goto end;
+                                }
+
                             }
+
                         }
                     }
                     // restore cmd
-                    *ptr = L'\"';
+                    *ptr = saved_sep;
                 }
             }
 #endif
@@ -715,6 +2569,8 @@ MSG_HEADER *ProcessServer::RunSandboxedHandler(MSG_HEADER *msg)
             }
 
         end:
+            ProcessServer_FreeBreakoutRelevanceCache(breakout_relevance_cache);
+            ProcessServer_FreeBoxEnabledCache(box_enabled_cache);
             CloseHandle(CallerProcessHandle);
 
         } else {
@@ -2057,22 +3913,28 @@ MSG_HEADER *ProcessServer::ProcInfoHandler(MSG_HEADER *msg)
         if (QueryFullProcessImageNameW(ProcessHandle, 0, filename, &dwSize))
             ImagePath = filename;
 
-        // Windows 8.1 and later
+        // Prefer the live PEB value because SbieDll may have rewritten it.
+        CommandLine = GetPebString(ProcessHandle, PhpoCommandLine);
+
+        // Use the Windows 8.1 query when the PEB cannot be read.
 #define ProcessCommandLineInformation ((PROCESSINFOCLASS)60)
-        ULONG returnLength = 0;
-        NTSTATUS status = NtQueryInformationProcess(ProcessHandle, ProcessCommandLineInformation, NULL, 0, &returnLength);
-        if (!(status != STATUS_BUFFER_OVERFLOW && status != STATUS_BUFFER_TOO_SMALL && status != STATUS_INFO_LENGTH_MISMATCH))
+        if (CommandLine.empty())
         {
-            PUNICODE_STRING commandLine = (PUNICODE_STRING)malloc(returnLength);
-            status = NtQueryInformationProcess(ProcessHandle, ProcessCommandLineInformation, commandLine, returnLength, &returnLength);
-            if (NT_SUCCESS(status) && commandLine->Buffer != NULL)
-                CommandLine = commandLine->Buffer;
-            free(commandLine);
+            ULONG returnLength = 0;
+            NTSTATUS status = NtQueryInformationProcess(ProcessHandle, ProcessCommandLineInformation, NULL, 0, &returnLength);
+            if (!(status != STATUS_BUFFER_OVERFLOW && status != STATUS_BUFFER_TOO_SMALL && status != STATUS_INFO_LENGTH_MISMATCH))
+            {
+                PUNICODE_STRING commandLine = (PUNICODE_STRING)malloc(returnLength);
+                if (commandLine) {
+                    status = NtQueryInformationProcess(ProcessHandle, ProcessCommandLineInformation, commandLine, returnLength, &returnLength);
+                    if (NT_SUCCESS(status) && commandLine->Buffer != NULL &&
+                            (commandLine->Length % sizeof(WCHAR)) == 0)
+                        CommandLine.assign(commandLine->Buffer, commandLine->Length / sizeof(WCHAR));
+                }
+                free(commandLine);
+            }
         }
 #undef ProcessCommandLineInformation
-
-        if (CommandLine.empty()) // fall back to the Win 7 method - requires PROCESS_VM_READ
-            CommandLine = GetPebString(ProcessHandle, PhpoCommandLine);
 
         WorkingDir = GetPebString(ProcessHandle, PhpoCurrentDirectory);
     }

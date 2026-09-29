@@ -5,6 +5,11 @@ on:
   pull_request:
     branches: [master, 'integrate/**']
     paths:
+      - 'Sandboxie/common/program_control*'
+      - 'Sandboxie/core/svc/UserServer.cpp'
+      - 'Sandboxie/core/svc/UserWire.h'
+      - 'Sandboxie/core/svc/ProcessServer.cpp'
+      - 'SandboxieTools/Tests/program-control/**'
       - 'Sandboxie/core/dll/file*.c'
       - 'SandboxieTools/Tests/junction-mapping/**'
       - 'SandboxiePlus/SandMan/Windows/SharedAccessWidget.*'
@@ -20,6 +25,11 @@ on:
   push:
     branches: [master]
     paths:
+      - 'Sandboxie/common/program_control*'
+      - 'Sandboxie/core/svc/UserServer.cpp'
+      - 'Sandboxie/core/svc/UserWire.h'
+      - 'Sandboxie/core/svc/ProcessServer.cpp'
+      - 'SandboxieTools/Tests/program-control/**'
       - 'Sandboxie/core/dll/file*.c'
       - 'SandboxieTools/Tests/junction-mapping/**'
       - 'SandboxiePlus/SandMan/Windows/SharedAccessWidget.*'
@@ -46,6 +56,8 @@ jobs:
         run: python3 SandboxieTools/Tests/command-line/run_tests.py
       - name: Junction mapping
         run: python3 SandboxieTools/Tests/junction-mapping/run_tests.py
+      - name: Program-control rules and requests
+        run: python3 SandboxieTools/Tests/program-control/run_tests.py
       - name: Install Qt
         run: |
           sudo apt-get update

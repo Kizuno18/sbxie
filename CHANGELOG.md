@@ -7,6 +7,8 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 ## [1.18.4 / 5.73.4] - 2026-09-06
 
 ### Added
+- added opt-in `UseForceBreakoutRuleExtensions` with `Priority`, `Recursive`, and `TargetBox` metadata, shared rule evaluation, and a SandMan editor [#5361](https://github.com/sandboxie-plus/Sandboxie/pull/5361)
+- added `DisableBreakoutRules`, `BreakoutUseTargetDir`, and per-launch Ignore Breakout controls in Plus and Classic; document routing preserves the registered-handler boundary
 - added opt-in `JunctionPath` mapping with longest-prefix matching, normalized root separators, and fail-closed allocation handling; raw target blocking remains opt-in [#5510](https://github.com/sandboxie-plus/Sandboxie/pull/5510)
 - added a shared file-access editor to sandbox options and the creation wizard, preserving group identifiers and reporting save failures [#5482](https://github.com/sandboxie-plus/Sandboxie/pull/5482)
 - added opt-in per-process `InjectCmdLine` arguments with bounded Unicode allocation and cleanup on ANSI conversion failure [#5489](https://github.com/sandboxie-plus/Sandboxie/pull/5489)
@@ -22,6 +24,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 - added the `Show Future Settings` editor setting (enabled by default) to include future-version settings in SandMan INI completion candidates
 
 ### Fixed
+- fixed bounded document matching, repeated-wildcard matching cost, and old/new document-request validation in the program-control integration
 - fixed self-updates failing to rename running executables or recreate their former paths while preserving image-write protection
 - fixed identity-profile Apply conflicting with the disk-serial checkbox in a deferred settings save [#5594](https://github.com/sandboxie-plus/Sandboxie/pull/5594)
 - fixed stale add-on uninstall keys being treated as installed and allowed removal-only operations without downloading add-on metadata [#5596](https://github.com/sandboxie-plus/Sandboxie/pull/5596)
