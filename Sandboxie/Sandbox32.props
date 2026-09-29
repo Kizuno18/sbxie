@@ -8,7 +8,7 @@
     <IncludePath>..\;..\..\;..\..\..\;$(VCInstallDir)include;$(WindowsSDK_IncludePath);$(VCInstallDir)atlmfc\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup>
-    <LibraryPath>$(VCInstallDir)lib;$(SolutionDir)Bin\$(PlatformName)\$(Configuration)\;$(WindowsSdkDir)lib;$(LibraryPath)</LibraryPath>
+    <LibraryPath>$(MSBuildThisFileDirectory)apps\common\Bin\$(PlatformName)\$(Configuration)\;$(MSBuildThisFileDirectory)Bin\$(PlatformName)\$(Configuration)\;$(VCInstallDir)lib;$(SolutionDir)Bin\$(PlatformName)\$(Configuration)\;$(WindowsSdkDir)lib;$(LibraryPath)</LibraryPath>
     <OutDir>$(SolutionDir)Bin\$(PlatformName)\$(Configuration)\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup>

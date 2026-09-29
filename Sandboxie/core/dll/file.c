@@ -497,6 +497,9 @@ static volatile LONG File_ShortNameFallbackParentMissingCacheNext = 0;
 
 static CRITICAL_SECTION *File_ShortNameFallbackCache_CritSec = NULL;
 
+static CRITICAL_SECTION File_ImagePath_CritSec;
+static WCHAR *File_ImagePath = NULL;
+
 BOOLEAN Dll_UseChromeSecurePreferencesHack = FALSE;
 
 
@@ -515,6 +518,63 @@ BOOLEAN Dll_UseChromeSecurePreferencesHack = FALSE;
 #include "file_misc.c"
 #include "file_copy.c"
 #include "file_init.c"
+
+static BOOLEAN File_IsImagePath(const WCHAR *Path)
+{
+    BOOLEAN matches = FALSE;
+    EnterCriticalSection(&File_ImagePath_CritSec);
+    __try {
+        const WCHAR *imagePath = File_ImagePath ? File_ImagePath : Ldr_ImageTruePath;
+        matches = imagePath && _wcsicmp(Path, imagePath) == 0;
+    } __finally {
+        LeaveCriticalSection(&File_ImagePath_CritSec);
+    }
+    return matches;
+}
+
+static NTSTATUS File_BeginImageRename(
+    const WCHAR *SourcePath, const WCHAR *TargetPath, BOOLEAN LinkOp, WCHAR **NewPath)
+{
+    const WCHAR *imagePath;
+    ULONG length;
+    BOOLEAN matches = FALSE;
+
+    if (LinkOp)
+        return STATUS_SUCCESS;
+
+    EnterCriticalSection(&File_ImagePath_CritSec);
+    __try {
+        imagePath = File_ImagePath ? File_ImagePath : Ldr_ImageTruePath;
+        matches = imagePath && _wcsicmp(SourcePath, imagePath) == 0;
+        if (matches) {
+            length = (wcslen(TargetPath) + 1) * sizeof(WCHAR);
+            *NewPath = Dll_Alloc(length);
+            if (*NewPath)
+                memcpy(*NewPath, TargetPath, length);
+        }
+    } __finally {
+        if (!*NewPath)
+            LeaveCriticalSection(&File_ImagePath_CritSec);
+    }
+    return matches && !*NewPath ? STATUS_INSUFFICIENT_RESOURCES : STATUS_SUCCESS;
+}
+
+static void File_EndImageRename(WCHAR **NewPath, BOOLEAN Succeeded)
+{
+    WCHAR *oldPath;
+    if (!*NewPath)
+        return;
+
+    oldPath = *NewPath;
+    if (Succeeded) {
+        oldPath = File_ImagePath;
+        File_ImagePath = *NewPath;
+    }
+    *NewPath = NULL;
+    if (oldPath)
+        Dll_Free(oldPath);
+    LeaveCriticalSection(&File_ImagePath_CritSec);
+}
 
 
 //---------------------------------------------------------------------------
@@ -3670,7 +3730,7 @@ ReparseLoop:
         if (DesiredAccess2 || (CreateDisposition != FILE_OPEN &&
                                CreateDisposition != FILE_OPEN_IF)) {
 
-            if (_wcsicmp(TruePath, Ldr_ImageTruePath) == 0) {
+            if (File_IsImagePath(TruePath)) {
 
                 status = STATUS_SHARING_VIOLATION;
                 __leave;
@@ -3957,7 +4017,8 @@ ReparseLoop:
             // NtSetInformationFile on the returned handle.)
             //
 
-            if (((DesiredAccess & FILE_DENIED_ACCESS) == DELETE) &&
+            if (TlsData->file_dont_strip_write_access == 0 &&
+                ((DesiredAccess & FILE_DENIED_ACCESS) == DELETE) &&
                 ((CreateOptions & FILE_DELETE_ON_CLOSE) == 0)) {
 
                 DesiredAccess &= ~DELETE;
@@ -8024,6 +8085,8 @@ _FX NTSTATUS File_RenameFile(
     ULONG len;
     BOOLEAN ReplaceIfExists;
 
+    WCHAR *NewImagePath = NULL;
+
     SourceHandle = NULL;
     TargetHandle = NULL;
     SourceTruePath = NULL;
@@ -8180,6 +8243,10 @@ _FX NTSTATUS File_RenameFile(
         // invoke the driver to do such a rename on our behalf
         //
 
+        status = File_BeginImageRename(SourceTruePath, TargetTruePath, LinkOp, &NewImagePath);
+        if (!NT_SUCCESS(status))
+            __leave;
+
         TargetFileName[-1] = L'\0';
 
         ReparsedPath = File_FixPermLinksForMatchPath(TargetTruePath);
@@ -8187,6 +8254,8 @@ _FX NTSTATUS File_RenameFile(
             ReparsedPath = TargetTruePath;
 
         status = SbieApi_RenameFile(SourceHandle, ReparsedPath, TargetFileName, ReplaceIfExists);
+
+        File_EndImageRename(&NewImagePath, NT_SUCCESS(status));
 
         if (ReparsedPath != TargetTruePath)
             Dll_Free(ReparsedPath);
@@ -8405,6 +8474,10 @@ _FX NTSTATUS File_RenameFile(
 
 issue_rename:
 
+    status = File_BeginImageRename(SourceTruePath, TargetTruePath, LinkOp, &NewImagePath);
+    if (!NT_SUCCESS(status))
+        __leave;
+
     status = __sys_NtSetInformationFile(
         SourceHandle, &IoStatusBlock,
         info2, info2_len, LinkOp ? FileLinkInformation : FileRenameInformation);
@@ -8424,6 +8497,8 @@ issue_rename:
             SourceHandle, &IoStatusBlock,
             info2, info2_len, LinkOp ? FileLinkInformation : FileRenameInformation);
     }
+
+    File_EndImageRename(&NewImagePath, NT_SUCCESS(status));
 
     if (! NT_SUCCESS(status)) {
 
@@ -8573,6 +8648,8 @@ after_rename:
     }
 
     Dll_PopTlsNameBuffer(TlsData);
+
+    File_EndImageRename(&NewImagePath, FALSE);
 
     if (SourceHandle && SourceHandle != FileHandle)
         NtClose(SourceHandle);

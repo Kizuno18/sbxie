@@ -1,0 +1,40 @@
+name: Identity profile tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/identity-profile.yml'
+      - 'SandboxiePlus/tests/identity-profile/**'
+      - 'SandboxiePlus/SandMan/Helpers/IdentityProfile.*'
+      - 'SandboxiePlus/SandMan/Windows/IdentityProfilesDialog.*'
+      - 'SandboxiePlus/SandMan/Windows/OptionsAdvanced.cpp'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/identity-profile.yml'
+      - 'SandboxiePlus/tests/identity-profile/**'
+      - 'SandboxiePlus/SandMan/Helpers/IdentityProfile.*'
+      - 'SandboxiePlus/SandMan/Windows/IdentityProfilesDialog.*'
+      - 'SandboxiePlus/SandMan/Windows/OptionsAdvanced.cpp'
+
+permissions:
+  contents: read
+
+jobs:
+  identity-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y qt6-base-dev
+      - name: Configure
+        run: cmake -S SandboxiePlus/tests/identity-profile -B build/identity-profile -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/identity-profile --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build/identity-profile -C Release --output-on-failure

@@ -134,6 +134,7 @@ _FX BOOLEAN File_Init(void)
     void *NtQueryDirectoryFileEx = NULL;
     void *NtQueryInformationByName = NULL;
     InitializeCriticalSection(&File_CurDir_CritSec);
+    InitializeCriticalSection(&File_ImagePath_CritSec);
 
     InitializeCriticalSection(&File_DirHandles_CritSec);
     List_Init(&File_DirHandles);

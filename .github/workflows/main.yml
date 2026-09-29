@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
   push:
-    branches: [master, experimental]
+    branches: [main, master, experimental]
     paths-ignore:
       # Case-sensitive paths to ignore on push events
       - '.editorconfig'
@@ -39,7 +39,7 @@ on:
       - '**/COPYING'
 
   pull_request:
-    branches: [master, experimental]
+    branches: [main, master, experimental]
     paths-ignore:
       # Case-sensitive paths to ignore on pull events
       - '.editorconfig'
