@@ -17,6 +17,10 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 - added the `Show Future Settings` editor setting (enabled by default) to include future-version settings in SandMan INI completion candidates
 
 ### Fixed
+- fixed self-updates failing to rename running executables or recreate their former paths while preserving image-write protection
+- fixed identity-profile Apply conflicting with the disk-serial checkbox in a deferred settings save [#5594](https://github.com/sandboxie-plus/Sandboxie/pull/5594)
+- fixed stale add-on uninstall keys being treated as installed and allowed removal-only operations without downloading add-on metadata [#5596](https://github.com/sandboxie-plus/Sandboxie/pull/5596)
+- fixed Classic copyright text formatting on code page 936 [#5599](https://github.com/sandboxie-plus/Sandboxie/pull/5599)
 - fixed blocked `ConnectEx` calls returning a truthy failure value instead of `FALSE` [#5262](https://github.com/sandboxie-plus/Sandboxie/pull/5262)
 - fixed add-on download failures being reported as success and add-on list refresh connections [#5596](https://github.com/sandboxie-plus/Sandboxie/pull/5596)
 - preserved unavailable adapter bindings when saving unrelated network options
