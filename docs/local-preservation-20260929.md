@@ -1,9 +1,11 @@
 # Local workspace preservation
 
-The `main` branch consolidates the source changes that were present in the
-Windows checkout on September 29, 2026. The previous `master` branch and
-existing contribution branches remain available. This is a fork maintenance
-integration, not a combined upstream contribution.
+The `master` branch contains the source changes that were present in the
+Windows checkout on September 29, 2026. The preservation PR originally landed
+on `main`; `master` was then fast-forwarded to retain that history and restored
+as the default branch to match upstream. The superseded `main` branch was
+removed, while existing contribution branches remain available. This is a
+fork maintenance integration, not a combined upstream contribution.
 
 ## Source changes
 
@@ -69,9 +71,9 @@ Qt development installation was also unavailable. No driver or service was
 replaced or restarted during preservation. Windows runtime validation remains
 necessary before proposing the image-rename change upstream.
 
-The existing Windows CI and CodeQL branch filters include `main` as well as
-`master`; build entry points remain documented in `AGENTS.md` and
-`.github/workflows/main.yml`.
+The Windows CI, CodeQL, and identity-profile test workflows target `master`.
+Windows CI also continues to cover `experimental`. Build entry points remain
+documented in `AGENTS.md` and `.github/workflows/main.yml`.
 
 See [the upstream assessment](upstream-assessment-20260929.md) for existing
 PRs and the remaining contribution candidates.

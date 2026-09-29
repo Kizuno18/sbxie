@@ -3,7 +3,7 @@ name: Identity profile tests
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - '.github/workflows/identity-profile.yml'
       - 'SandboxiePlus/tests/identity-profile/**'
@@ -11,7 +11,7 @@ on:
       - 'SandboxiePlus/SandMan/Windows/IdentityProfilesDialog.*'
       - 'SandboxiePlus/SandMan/Windows/OptionsAdvanced.cpp'
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - '.github/workflows/identity-profile.yml'
       - 'SandboxiePlus/tests/identity-profile/**'
