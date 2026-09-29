@@ -7,6 +7,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 ## [1.18.4 / 5.73.4] - 2026-09-06
 
 ### Added
+- added portable sandbox creation with a separate INI file and rollback on import failure; existing configurations are never overwritten [#5488](https://github.com/sandboxie-plus/Sandboxie/pull/5488)
 - added opt-in `BlockPrivateNet=y` filtering for private and link-local IPv4/IPv6 destinations in WFP and synchronous Winsock fallback paths [#5262](https://github.com/sandboxie-plus/Sandboxie/pull/5262)
 - added optional `AlwaysActive=y` window activation handling, preserving normal focus transfers within the same process [#4140](https://github.com/sandboxie-plus/Sandboxie/pull/4140)
 - added optional automatic snapshot capture on sandbox close and a snapshot-before-delete recovery action; snapshot errors abort automatic deletion [#5493](https://github.com/sandboxie-plus/Sandboxie/pull/5493)
