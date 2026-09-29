@@ -53,7 +53,8 @@ original snapshot.
 
 `git diff --check`, PowerShell parser checks, and XML parsing of both changed
 property sheets are the local static checks. The identity-profile workflow
-runs all 32 CTest cases against Qt 6 on Linux. These tests exercise the profile
+[passed all 32 CTest cases](https://github.com/Kizuno18/sbxie/actions/runs/36623917613)
+against Qt 6 on Linux at source revision `0e0236e2`. These tests exercise the profile
 model and simulated storage, not Windows hooks or the installed service.
 
 A fresh local Win32 build was attempted with:
@@ -71,3 +72,6 @@ necessary before proposing the image-rename change upstream.
 The existing Windows CI and CodeQL branch filters include `main` as well as
 `master`; build entry points remain documented in `AGENTS.md` and
 `.github/workflows/main.yml`.
+
+See [the upstream assessment](upstream-assessment-20260929.md) for existing
+PRs and the remaining contribution candidates.
