@@ -3,7 +3,7 @@ name: "CodeQL"
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [master]
     paths:
       - '**.c'
       - '**.cpp'
@@ -18,7 +18,7 @@ on:
       - '**.props'
   pull_request:
     types: [opened, reopened, synchronize]
-    branches: [main, master]
+    branches: [master]
     paths:
       - '**.c'
       - '**.cpp'

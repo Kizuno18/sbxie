@@ -48,6 +48,6 @@ not by themselves reproduce or prove the standalone build issue.
 ## Fork-only material
 
 The local deployment/configuration scripts, historical compiled files,
-snapshot release, and `main` branch policy are maintenance for this fork.
+snapshot release, and default-branch configuration are maintenance for this fork.
 They should not be bundled into either prospective upstream PR. This audit
 does not create, update, or comment on upstream contributions.
